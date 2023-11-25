@@ -23,7 +23,7 @@ require (
 	github.com/aquasecurity/table v1.8.0
 	github.com/aquasecurity/testdocker v0.0.0-20230111101738-e741bda259da
 	github.com/aquasecurity/tml v0.6.1
-	github.com/aquasecurity/trivy-aws v0.6.0
+	github.com/aquasecurity/trivy-aws v0.6.1-0.20231125042420-17e10d01b82f
 	github.com/aquasecurity/trivy-db v0.0.0-20231005141211-4fc651f7ac8d
 	github.com/aquasecurity/trivy-java-db v0.0.0-20230209231723-7cddb1406728
 	github.com/aquasecurity/trivy-kubernetes v0.5.9-0.20231115100645-921512b4d163
@@ -422,5 +422,3 @@ replace github.com/testcontainers/testcontainers-go => github.com/testcontainers
 replace github.com/aquasecurity/defsec => /Users/simarpreetsingh/repos/defsec
 
 replace github.com/aquasecurity/trivy-policies => /Users/simarpreetsingh/repos/trivy-policies
-
-replace github.com/aquasecurity/trivy-aws => /Users/simarpreetsingh/repos/trivy-aws
