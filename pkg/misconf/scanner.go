@@ -18,6 +18,7 @@ import (
 	"github.com/aquasecurity/trivy/pkg/iac/detection"
 	"github.com/aquasecurity/trivy/pkg/iac/scan"
 	"github.com/aquasecurity/trivy/pkg/iac/scanners"
+	"github.com/aquasecurity/trivy/pkg/iac/scanners/ansible"
 	"github.com/aquasecurity/trivy/pkg/iac/scanners/azure/arm"
 	cfscanner "github.com/aquasecurity/trivy/pkg/iac/scanners/cloudformation"
 	cfparser "github.com/aquasecurity/trivy/pkg/iac/scanners/cloudformation/parser"
@@ -41,6 +42,7 @@ var enablediacTypes = map[detection.FileType]types.ConfigType{
 	detection.FileTypeKubernetes:     types.Kubernetes,
 	detection.FileTypeHelm:           types.Helm,
 	detection.FileTypeTerraformPlan:  types.TerraformPlan,
+	detection.FileTypeAnsible:        types.Ansible,
 }
 
 type ScannerOption struct {
@@ -103,6 +105,10 @@ func NewTerraformPlanScanner(filePatterns []string, opt ScannerOption) (*Scanner
 	return newScanner(detection.FileTypeTerraformPlan, filePatterns, opt)
 }
 
+func NewAnsibleScanner(filePatterns []string, opt ScannerOption) (*Scanner, error) {
+	return newScanner(detection.FileTypeAnsible, filePatterns, opt)
+}
+
 func newScanner(t detection.FileType, filePatterns []string, opt ScannerOption) (*Scanner, error) {
 	opts, err := scannerOptions(t, opt)
 	if err != nil {
@@ -125,6 +131,8 @@ func newScanner(t detection.FileType, filePatterns []string, opt ScannerOption) 
 		scanner = terraform.New(opts...)
 	case detection.FileTypeTerraformPlan:
 		scanner = tfpscanner.New(opts...)
+	case detection.FileTypeAnsible:
+		scanner = ansible.New(opts...)
 	}
 
 	return &Scanner{

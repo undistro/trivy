@@ -116,6 +116,7 @@ const (
 	TypeKubernetes     Type = Type(detection.FileTypeKubernetes)
 	TypeTerraform      Type = Type(detection.FileTypeTerraform)
 	TypeTerraformPlan  Type = Type(detection.FileTypeTerraformPlan)
+	TypeAnsible        Type = Type(detection.FileTypeAnsible)
 
 	// ========
 	// License
@@ -229,5 +230,6 @@ var (
 		TypeKubernetes,
 		TypeTerraform,
 		TypeTerraformPlan,
+		TypeAnsible,
 	}
 )

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -27,6 +28,7 @@ const (
 	FileTypeJSON           FileType = "json"
 	FileTypeHelm           FileType = "helm"
 	FileTypeAzureARM       FileType = "azure-arm"
+	FileTypeAnsible        FileType = "ansible"
 )
 
 var matchers = make(map[FileType]func(name string, r io.ReadSeeker) bool)
@@ -234,6 +236,11 @@ func init() {
 		}
 
 		return false
+	}
+
+	// TODO
+	matchers[FileTypeAnsible] = func(name string, r io.ReadSeeker) bool {
+		return slices.Contains([]string{".yml", ".yaml"}, filepath.Ext(name))
 	}
 }
 

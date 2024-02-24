@@ -124,6 +124,7 @@ require (
 	github.com/antchfx/htmlquery v1.3.0
 	github.com/apparentlymart/go-cidr v1.1.0
 	github.com/aws/smithy-go v1.19.0
+	github.com/google/go-cmp v0.6.0
 	github.com/hashicorp/go-uuid v1.0.1
 	github.com/hashicorp/hcl/v2 v2.19.1
 	github.com/liamg/iamgo v0.0.9
@@ -281,7 +282,6 @@ require (
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/gnostic-models v0.6.8 // indirect
-	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/google/gofuzz v1.2.0 // indirect
 	github.com/google/pprof v0.0.0-20230406165453-00490a63f317 // indirect
 	github.com/google/s2a-go v0.1.7 // indirect
