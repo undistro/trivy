@@ -146,6 +146,7 @@ func (p *Parser) LoadPlaybook(sourceMetadata *iacTypes.Metadata, path string) (P
 }
 
 func (p *Parser) readAnsibleConfig(projectPath string) (AnsibleConfig, error) {
+	// TODO(simar): Implement ansible config setup
 	return AnsibleConfig{}, nil
 }
 

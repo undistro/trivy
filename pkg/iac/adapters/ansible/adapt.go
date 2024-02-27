@@ -11,6 +11,7 @@ func Adapt(tasks parser.Tasks) state.State {
 	return state.State{
 		AWS: aws.AWS{
 			S3: s3.Adapt(tasks),
+			// TODO(simar): Add other AWS services
 		},
 	}
 }
