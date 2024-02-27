@@ -124,6 +124,7 @@ require (
 	github.com/antchfx/htmlquery v1.3.0
 	github.com/apparentlymart/go-cidr v1.1.0
 	github.com/aws/smithy-go v1.19.0
+	github.com/flosch/pongo2/v6 v6.0.0
 	github.com/google/go-cmp v0.6.0
 	github.com/hashicorp/go-uuid v1.0.1
 	github.com/hashicorp/hcl/v2 v2.19.1
@@ -135,6 +136,7 @@ require (
 	github.com/zclconf/go-cty v1.13.0
 	github.com/zclconf/go-cty-yaml v1.0.3
 	golang.org/x/crypto v0.18.0
+	gopkg.in/ini.v1 v1.67.0
 	helm.sh/helm/v3 v3.14.2
 )
 
@@ -398,7 +400,6 @@ require (
 	google.golang.org/grpc v1.61.0 // indirect
 	gopkg.in/cheggaaa/pb.v1 v1.0.28 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
-	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	k8s.io/apiextensions-apiserver v0.29.0 // indirect
