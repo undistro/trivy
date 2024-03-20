@@ -1,0 +1,187 @@
+commit a8f52b114bc6c5bda0b677ae5c5a7053b686e960
+Author: Kevin Conner <kev.conner@getupcloud.com>
+Date:   Tue Feb 27 19:08:37 2024 -0800
+
+    bug(aws): handle ECR repositories in different regions
+    
+    Signed-off-by: Kevin Conner <kev.conner@getupcloud.com>
+
+diff --git a/pkg/fanal/image/registry/ecr/ecr.go b/pkg/fanal/image/registry/ecr/ecr.go
+index e675ed47a..3d644075a 100644
+--- a/pkg/fanal/image/registry/ecr/ecr.go
++++ b/pkg/fanal/image/registry/ecr/ecr.go
+@@ -3,6 +3,7 @@ package ecr
+ import (
+ 	"context"
+ 	"encoding/base64"
++	"regexp"
+ 	"strings"
+ 
+ 	"github.com/aws/aws-sdk-go-v2/aws"
+@@ -12,10 +13,9 @@ import (
+ 	"golang.org/x/xerrors"
+ 
+ 	"github.com/aquasecurity/trivy/pkg/fanal/types"
++	"github.com/aquasecurity/trivy/pkg/log"
+ )
+ 
+-const ecrURL = "amazonaws.com"
+-
+ type ecrAPI interface {
+ 	GetAuthorizationToken(ctx context.Context, params *ecr.GetAuthorizationTokenInput, optFns ...func(*ecr.Options)) (*ecr.GetAuthorizationTokenOutput, error)
+ }
+@@ -24,24 +24,28 @@ type ECR struct {
+ 	Client ecrAPI
+ }
+ 
+-func getSession(option types.RegistryOptions) (aws.Config, error) {
++func getSession(domain, region string, option types.RegistryOptions) (aws.Config, error) {
+ 	// create custom credential information if option is valid
+ 	if option.AWSSecretKey != "" && option.AWSAccessKey != "" && option.AWSRegion != "" {
++		if region != option.AWSRegion {
++			log.Logger.Warnf("The region from AWS_REGION (%s) is being overridden. The region from domain (%s) was used.", option.AWSRegion, domain)
++		}
+ 		return config.LoadDefaultConfig(
+ 			context.TODO(),
+-			config.WithRegion(option.AWSRegion),
++			config.WithRegion(region),
+ 			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(option.AWSAccessKey, option.AWSSecretKey, option.AWSSessionToken)),
+ 		)
+ 	}
+-	return config.LoadDefaultConfig(context.TODO())
++	return config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
+ }
+ 
+ func (e *ECR) CheckOptions(domain string, option types.RegistryOptions) error {
+-	if !strings.HasSuffix(domain, ecrURL) {
++	region := determineRegion(domain)
++	if region == "" {
+ 		return xerrors.Errorf("ECR : %w", types.InvalidURLPattern)
+ 	}
+ 
+-	cfg, err := getSession(option)
++	cfg, err := getSession(domain, region, option)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -51,6 +55,26 @@ func (e *ECR) CheckOptions(domain string, option types.RegistryOptions) error {
+ 	return nil
+ }
+ 
++// Endpoints take the form
++// <registry-id>.dkr.ecr.<region>.amazonaws.com
++// <registry-id>.dkr.ecr-fips.<region>.amazonaws.com
++// <registry-id>.dkr.ecr.<region>.amazonaws.com.cn
++// <registry-id>.dkr.ecr.<region>.sc2s.sgov.gov
++// <registry-id>.dkr.ecr.<region>.c2s.ic.gov
++// see
++// - https://docs.aws.amazon.com/general/latest/gr/ecr.html
++// - https://docs.amazonaws.cn/en_us/aws/latest/userguide/endpoints-arns.html
++// - https://github.com/boto/botocore/blob/1.34.51/botocore/data/endpoints.json
++var ecrEndpointMatch = regexp.MustCompile(`^[^.]+\.dkr\.ecr(?:-fips)?\.([^.]+)\.(?:amazonaws\.com(?:\.cn)?|sc2s\.sgov\.gov|c2s\.ic\.gov)$`)
++
++func determineRegion(domain string) string {
++	matches := ecrEndpointMatch.FindStringSubmatch(domain)
++	if matches != nil {
++		return matches[1]
++	}
++	return ""
++}
++
+ func (e *ECR) GetCredential(ctx context.Context) (username, password string, err error) {
+ 	input := &ecr.GetAuthorizationTokenInput{}
+ 	result, err := e.Client.GetAuthorizationToken(ctx, input)
+diff --git a/pkg/fanal/image/registry/ecr/ecr_test.go b/pkg/fanal/image/registry/ecr/ecr_test.go
+index 63ae18581..3a56ffc3e 100644
+--- a/pkg/fanal/image/registry/ecr/ecr_test.go
++++ b/pkg/fanal/image/registry/ecr/ecr_test.go
+@@ -8,21 +8,76 @@ import (
+ 	"github.com/aws/aws-sdk-go-v2/aws"
+ 	"github.com/aws/aws-sdk-go-v2/service/ecr"
+ 	awstypes "github.com/aws/aws-sdk-go-v2/service/ecr/types"
++	"github.com/stretchr/testify/require"
+ 
+ 	"github.com/aquasecurity/trivy/pkg/fanal/types"
+ )
+ 
++type testECRClient interface {
++	Options() ecr.Options
++}
++
+ func TestCheckOptions(t *testing.T) {
+ 	var tests = map[string]struct {
+-		domain  string
+-		wantErr error
++		domain         string
++		expectedRegion string
++		wantErr        error
+ 	}{
+ 		"InvalidURL": {
+ 			domain:  "alpine:3.9",
+ 			wantErr: types.InvalidURLPattern,
+ 		},
+ 		"NoOption": {
+-			domain: "xxx.ecr.ap-northeast-1.amazonaws.com",
++			domain:         "xxx.dkr.ecr.ap-northeast-1.amazonaws.com",
++			expectedRegion: "ap-northeast-1",
++		},
++		"region-1": {
++			domain:         "xxx.dkr.ecr.region-1.amazonaws.com",
++			expectedRegion: "region-1",
++		},
++		"region-2": {
++			domain:         "xxx.dkr.ecr.region-2.amazonaws.com",
++			expectedRegion: "region-2",
++		},
++		"fips-region-1": {
++			domain:         "xxx.dkr.ecr-fips.fips-region.amazonaws.com",
++			expectedRegion: "fips-region",
++		},
++		"cn-region-1": {
++			domain:         "xxx.dkr.ecr.region-1.amazonaws.com.cn",
++			expectedRegion: "region-1",
++		},
++		"cn-region-2": {
++			domain:         "xxx.dkr.ecr.region-2.amazonaws.com.cn",
++			expectedRegion: "region-2",
++		},
++		"sc2s-region-1": {
++			domain:         "xxx.dkr.ecr.sc2s-region.sc2s.sgov.gov",
++			expectedRegion: "sc2s-region",
++		},
++		"c2s-region-1": {
++			domain:         "xxx.dkr.ecr.c2s-region.c2s.ic.gov",
++			expectedRegion: "c2s-region",
++		},
++		"invalid-ecr": {
++			domain:  "xxx.dkrecr.region-1.amazonaws.com",
++			wantErr: types.InvalidURLPattern,
++		},
++		"invalid-fips": {
++			domain:  "xxx.dkr.ecrfips.fips-region.amazonaws.com",
++			wantErr: types.InvalidURLPattern,
++		},
++		"invalid-cn": {
++			domain:  "xxx.dkr.ecr.region-2.amazonaws.cn",
++			wantErr: types.InvalidURLPattern,
++		},
++		"invalid-sc2s": {
++			domain:  "xxx.dkr.ecr.sc2s-region.sc2s.sgov",
++			wantErr: types.InvalidURLPattern,
++		},
++		"invalid-cs2": {
++			domain:  "xxx.dkr.ecr.c2s-region.c2s.ic",
++			wantErr: types.InvalidURLPattern,
+ 		},
+ 	}
+ 
+@@ -35,6 +90,9 @@ func TestCheckOptions(t *testing.T) {
+ 			}
+ 			continue
+ 		}
++
++		client := a.Client.(testECRClient)
++		require.Equal(t, v.expectedRegion, client.Options().Region)
+ 	}
+ }
+ 
