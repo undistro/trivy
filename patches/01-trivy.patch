@@ -1,4 +1,4 @@
-commit a3ca3e7c9d7673be0ba6debbd86237d60199c23a
+commit cf22fc85ebcc5fa66b924e41f8f473adac7a549f
 Author: Kevin Conner <kev.conner@getupcloud.com>
 Date:   Tue Feb 27 19:08:37 2024 -0800
 
@@ -64,7 +64,7 @@ index ae823b82..bc16d8b2 100644
  				assert.EqualError(t, err, tt.wantErr)
  			} else {
 diff --git a/pkg/fanal/image/registry/ecr/ecr.go b/pkg/fanal/image/registry/ecr/ecr.go
-index e675ed47..2b13b01d 100644
+index e675ed47..bfc49185 100644
 --- a/pkg/fanal/image/registry/ecr/ecr.go
 +++ b/pkg/fanal/image/registry/ecr/ecr.go
 @@ -3,8 +3,10 @@ package ecr
@@ -78,7 +78,7 @@ index e675ed47..2b13b01d 100644
  	"github.com/aws/aws-sdk-go-v2/aws"
  	"github.com/aws/aws-sdk-go-v2/config"
  	"github.com/aws/aws-sdk-go-v2/credentials"
-@@ -12,46 +14,72 @@ import (
+@@ -12,46 +14,71 @@ import (
  	"golang.org/x/xerrors"
  
  	"github.com/aquasecurity/trivy/pkg/fanal/types"
@@ -96,7 +96,6 @@ index e675ed47..2b13b01d 100644
 +
 +type ECRClient struct {
  	Client ecrAPI
-+	region string
  }
  
 -func getSession(option types.RegistryOptions) (aws.Config, error) {
@@ -136,7 +135,7 @@ index e675ed47..2b13b01d 100644
  	svc := ecr.NewFromConfig(cfg)
 -	e.Client = svc
 -	return nil
-+	return &ECRClient{Client: svc, region: region}, nil
++	return &ECRClient{Client: svc}, nil
 +}
 +
 +// Endpoints take the form
