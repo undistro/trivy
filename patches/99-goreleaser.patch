@@ -9,7 +9,7 @@ new file mode 100644
 index 000000000..bbeb6f5d0
 --- /dev/null
 +++ b/goreleaser.undistro.yaml
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,125 @@
 +project_name: trivy
 +builds:
 +  - id: build-linux
@@ -115,6 +115,18 @@ index 000000000..bbeb6f5d0
 +
 +docker_manifests:
 +  - name_template: 'ghcr.io/undistro/trivy:{{ .Version }}'
++    image_templates:
++    - 'ghcr.io/undistro/trivy:{{ .Version }}-amd64'
++    - 'ghcr.io/undistro/trivy:{{ .Version }}-arm64'
++    - 'ghcr.io/undistro/trivy:{{ .Version }}-s390x'
++    - 'ghcr.io/undistro/trivy:{{ .Version }}-ppc64le'
++  - name_template: 'ghcr.io/undistro/trivy:{{ .Major }}.{{ .Minor }}'
++    image_templates:
++    - 'ghcr.io/undistro/trivy:{{ .Version }}-amd64'
++    - 'ghcr.io/undistro/trivy:{{ .Version }}-arm64'
++    - 'ghcr.io/undistro/trivy:{{ .Version }}-s390x'
++    - 'ghcr.io/undistro/trivy:{{ .Version }}-ppc64le'
++  - name_template: 'ghcr.io/undistro/trivy:latest'
 +    image_templates:
 +    - 'ghcr.io/undistro/trivy:{{ .Version }}-amd64'
 +    - 'ghcr.io/undistro/trivy:{{ .Version }}-arm64'
