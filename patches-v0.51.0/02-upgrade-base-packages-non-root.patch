@@ -1,17 +1,19 @@
-commit cbcfeabace93906355a6cabf8f19dc944e8ad4d8
+commit 02e74e942f90ddea4d1c366ddf70c8374d2582f9
 Author: Kevin Conner <kev.conner@getupcloud.com>
-Date:   Thu Mar 28 08:54:52 2024 -0700
+Date:   Mon May 6 16:23:20 2024 -0700
 
-    upgrade base image packages
+    upgrade base packages and add non-root user
 
 diff --git a/Dockerfile b/Dockerfile
-index 9c7b2d83f..c63ca4e61 100644
+index 9c7b2d83f..071f7ade3 100644
 --- a/Dockerfile
 +++ b/Dockerfile
-@@ -1,5 +1,6 @@
+@@ -1,5 +1,8 @@
  FROM alpine:3.19.1
  RUN apk --no-cache add ca-certificates git
 +RUN apk upgrade && rm /var/cache/apk/*
  COPY trivy /usr/local/bin/trivy
  COPY contrib/*.tpl contrib/
++RUN adduser -u 5000 -D nonroot
++USER 5000
  ENTRYPOINT ["trivy"]
