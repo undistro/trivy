@@ -103,7 +103,7 @@ index e675ed47..bfc49185 100644
  	// create custom credential information if option is valid
  	if option.AWSSecretKey != "" && option.AWSAccessKey != "" && option.AWSRegion != "" {
 +		if region != option.AWSRegion {
-+			log.Logger.Warnf("The region from AWS_REGION (%s) is being overridden. The region from domain (%s) was used.", option.AWSRegion, domain)
++			log.Warnf("The region from AWS_REGION (%s) is being overridden. The region from domain (%s) was used.", option.AWSRegion, domain)
 +		}
  		return config.LoadDefaultConfig(
  			context.TODO(),
