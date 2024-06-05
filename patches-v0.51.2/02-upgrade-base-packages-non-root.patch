@@ -14,6 +14,6 @@ index 9c7b2d83f..071f7ade3 100644
 +RUN apk upgrade && rm /var/cache/apk/*
  COPY trivy /usr/local/bin/trivy
  COPY contrib/*.tpl contrib/
-+RUN adduser -u 5000 -D nonroot
++RUN adduser -u 5000 -D nonroot && addgroup nonroot root
 +USER 5000
  ENTRYPOINT ["trivy"]
