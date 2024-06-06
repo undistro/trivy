@@ -8,11 +8,13 @@ diff --git a/Dockerfile b/Dockerfile
 index 9c7b2d83f..071f7ade3 100644
 --- a/Dockerfile
 +++ b/Dockerfile
-@@ -1,5 +1,8 @@
+@@ -1,5 +1,9 @@
  FROM alpine:3.19.1
  RUN apk --no-cache add ca-certificates git
+-COPY trivy /usr/local/bin/trivy
 +RUN apk upgrade && rm /var/cache/apk/*
- COPY trivy /usr/local/bin/trivy
++COPY trivy /usr/local/bin/trivy.bin
++RUN echo '#!/bin/sh' > /usr/local/bin/trivy && echo 'umask 002 && echo "umask set to $(umask)" && /usr/local/bin/trivy.bin "$@"' >> /usr/local/bin/trivy && chmod +x /usr/local/bin/trivy
  COPY contrib/*.tpl contrib/
 +RUN adduser -u 5000 -D nonroot && addgroup nonroot root
 +USER 5000
