@@ -9,4 +9,4 @@ export PATH="${PATH}:${PATCH_GO_PATH}"
 echo "Bumping trivy-kubernetes dependency version"
 
 go get \
-   github.com/aquasecurity/trivy-kubernetes@f39bd949a3acca3f27ba7c54a1bd8f4ab3188aea
+   github.com/aquasecurity/trivy-kubernetes@56e5b9a4264946b1679d2699fdffe2f7bee5e23c
