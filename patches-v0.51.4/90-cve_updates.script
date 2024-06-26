@@ -22,3 +22,6 @@ go get github.com/hashicorp/go-getter@v1.7.5
 
 echo "Running go mod tidy"
 go mod tidy
+
+echo "Running clean of the modcache"
+go clean -modcache
