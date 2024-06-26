@@ -10,3 +10,5 @@ echo "Bumping go-getter dependency to fix CVE-2024-6257"
 
 go get \
    github.com/hashicorp/go-getter@v1.7.5
+
+go mod tidy
