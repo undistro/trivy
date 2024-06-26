@@ -8,5 +8,17 @@ export PATH="${PATH}:${PATCH_GO_PATH}"
 
 echo "Patching go dependencies to address vulnerabilities"
 
-go get \
-   github.com/Azure/azure-sdk-for-go/sdk/azidentity@v1.6.0
+echo "Bumping azure-sdk-for-go/sdk/azidentity dependency version to v1.6.0"
+go get github.com/Azure/azure-sdk-for-go/sdk/azidentity@v1.6.0
+
+echo "Bumping trivy-kubernetes dependency version"
+go get github.com/aquasecurity/trivy-kubernetes@56e5b9a4264946b1679d2699fdffe2f7bee5e23c
+
+echo "Bumping trivy-checks dependency version"
+go get github.com/aquasecurity/trivy-checks@6cc735de6b9ec703a6ad9204f7a7cf735fd9098d
+
+echo "Bumping go-getter dependency version to v1.7.5"
+go get github.com/hashicorp/go-getter@v1.7.5
+
+echo "Running go mod tidy"
+go mod tidy
