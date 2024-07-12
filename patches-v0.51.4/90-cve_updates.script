@@ -11,11 +11,14 @@ echo "Patching go dependencies to address vulnerabilities"
 echo "Bumping azure-sdk-for-go/sdk/azidentity dependency version to v1.6.0"
 go get github.com/Azure/azure-sdk-for-go/sdk/azidentity@v1.6.0
 
-echo "Bumping trivy-kubernetes dependency version"
-go get github.com/aquasecurity/trivy-kubernetes@56e5b9a4264946b1679d2699fdffe2f7bee5e23c
+echo "Patching go.mod to use the patched trivy-kubernetes library"
+cat - >> go.mod << EOF
 
-echo "Bumping trivy-checks dependency version"
-go get github.com/aquasecurity/trivy-checks@6cc735de6b9ec703a6ad9204f7a7cf735fd9098d
+replace (
+       github.com/aquasecurity/trivy-checks => github.com/aquasecurity/trivy-checks v0.0.0-20240430045208-6cc735de6b9e
+       github.com/aquasecurity/trivy-kubernetes => github.com/aquasecurity/trivy-kubernetes v0.0.0-20240626072334-56e5b9a42649
+)
+EOF
 
 echo "Bumping go-getter dependency version to v1.7.5"
 go get github.com/hashicorp/go-getter@v1.7.5
