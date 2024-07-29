@@ -775,8 +775,8 @@ github.com/aquasecurity/trivy-db v0.0.0-20231005141211-4fc651f7ac8d h1:fjI9mkoTU
 github.com/aquasecurity/trivy-db v0.0.0-20231005141211-4fc651f7ac8d/go.mod h1:cj9/QmD9N3OZnKQMp+/DvdV+ym3HyIkd4e+F0ZM3ZGs=
 github.com/aquasecurity/trivy-java-db v0.0.0-20240109071736-184bd7481d48 h1:JVgBIuIYbwG+ekC5lUHUpGJboPYiCcxiz06RCtz8neI=
 github.com/aquasecurity/trivy-java-db v0.0.0-20240109071736-184bd7481d48/go.mod h1:Ldya37FLi0e/5Cjq2T5Bty7cFkzUDwTcPeQua+2M8i8=
-github.com/aquasecurity/trivy-kubernetes v0.6.7-0.20240627095026-cf9d48837f6d h1:z5Ug+gqNjgHzCo7rmv6wKTmyJ8E3bAVEU2AASo3740s=
-github.com/aquasecurity/trivy-kubernetes v0.6.7-0.20240627095026-cf9d48837f6d/go.mod h1:HOhrqoyIeTxpwnKr1EyWtQ+rt2XahV8b0UDBrRpSfEQ=
+github.com/aquasecurity/trivy-kubernetes v0.0.0-20240626072334-56e5b9a42649 h1:Dn4SeNmoZ3xLpsdxN8/glnuB3yIDBMFg1A9bQEaMKXE=
+github.com/aquasecurity/trivy-kubernetes v0.0.0-20240626072334-56e5b9a42649/go.mod h1:IWVhRPUPUQp1WB2RBTEhzsVVWjYZMZQVzkOiSDN24DM=
 github.com/arbovm/levenshtein v0.0.0-20160628152529-48b4e1c0c4d0 h1:jfIu9sQUG6Ig+0+Ap1h4unLjW6YQJpKZVmUzxsD4E/Q=
 github.com/arbovm/levenshtein v0.0.0-20160628152529-48b4e1c0c4d0/go.mod h1:t2tdKJDJF9BV14lnkjHmOQgcvEKgtqs5a1N3LNdJhGE=
 github.com/armon/consul-api v0.0.0-20180202201655-eb2c6b5be1b6/go.mod h1:grANhF5doyWs3UAsr3K4I6qtAmlQcZDesFNEHPZAzj8=
@@ -2901,8 +2901,8 @@ google.golang.org/grpc v1.53.0/go.mod h1:OnIrk0ipVdj4N5d9IUoFUx72/VlD7+jUsHwZgwS
 google.golang.org/grpc v1.54.0/go.mod h1:PUSEXI6iWghWaB6lXM4knEgpJNu2qUcKfDtNci3EC2g=
 google.golang.org/grpc v1.55.0/go.mod h1:iYEXKGkEBhg1PjZQvoYEVPTDkHo1/bjTnfwTeGONTY8=
 google.golang.org/grpc v1.56.3/go.mod h1:I9bI3vqKfayGqPUAwGdOSu7kt6oIJLixfffKrpXqQ9s=
-google.golang.org/grpc v1.64.0 h1:KH3VH9y/MgNQg1dE7b3XfVK0GsPSIzJwdF617gUSbvY=
-google.golang.org/grpc v1.64.0/go.mod h1:oxjF8E3FBnjp+/gVFYdWacaLDx9na1aqy9oovLpxQYg=
+google.golang.org/grpc v1.64.1 h1:LKtvyfbX3UGVPFcGqJ9ItpVWW6oN/2XqTxfAnwRRXiA=
+google.golang.org/grpc v1.64.1/go.mod h1:hiQF4LFZelK2WKaP6W0L92zGHtiQdZxk8CrSdvyjeP0=
 google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.1.0/go.mod h1:6Kw0yEErY5E/yWrBtf03jp27GLLJujG4z/JK95pnjjw=
 google.golang.org/protobuf v0.0.0-20200109180630-ec00e32a8dfd/go.mod h1:DFci5gLYBciE7Vtevhsrf46CRTquxDuWsQurQQe4oz8=
 google.golang.org/protobuf v0.0.0-20200221191635-4d8936d0db64/go.mod h1:kwYJMbMJ01Woi6D6+Kah6886xMZcty6N08ah7+eCXa0=

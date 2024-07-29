@@ -361,7 +361,7 @@ require (
 	google.golang.org/genproto v0.0.0-20240311173647-c811ad7063a7 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20240520151616-dc85e6b867a5 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240515191416-fc5f0ca64291 // indirect
-	google.golang.org/grpc v1.64.0 // indirect
+	google.golang.org/grpc v1.64.1 // indirect
 	gopkg.in/cheggaaa/pb.v1 v1.0.28 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
@@ -389,3 +389,5 @@ require (
 	sigs.k8s.io/kustomize/kyaml v0.14.3-0.20230601165947-6ce0bf390ce3 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
 )
+
+replace github.com/aquasecurity/trivy-kubernetes => github.com/aquasecurity/trivy-kubernetes v0.0.0-20240626072334-56e5b9a42649
