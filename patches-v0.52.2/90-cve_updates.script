@@ -1,0 +1,31 @@
+#!/bin/sh
+
+cd "$1"
+
+PATCH_GO_VERSION=$(egrep '^go ' go.mod | awk '{print $2}' | sed -e 's+^\([0-9]*\.[0-9]*\)[^0-9]*.*$+\1+')
+PATCH_GO_PATH="$(ls -d ${RUNNER_TOOL_CACHE}/go/${PATCH_GO_VERSION}.*/*/bin)"
+export PATH="${PATH}:${PATCH_GO_PATH}"
+
+echo "Patching go dependencies to address vulnerabilities"
+
+echo "Updating go-retryablehttp dependency version to v0.7.7"
+go get github.com/hashicorp/go-retryablehttp@v0.7.7
+
+echo "Updating grpc dependency version to v1.64.1"
+go get google.golang.org/grpc@v1.64.1
+
+echo "Patching go.mod to use the patched trivy-kubernetes library"
+cat - >> go.mod << EOF
+replace (
+       github.com/aquasecurity/trivy-kubernetes => github.com/aquasecurity/trivy-kubernetes v0.0.0-20240626072334-56e5b9a42649
+)
+EOF
+
+echo "Bumping go-getter dependency version to v1.7.5"
+go get github.com/hashicorp/go-getter@v1.7.5
+
+echo "Running go mod tidy"
+go mod tidy
+
+echo "Running clean of the modcache"
+go clean -modcache
