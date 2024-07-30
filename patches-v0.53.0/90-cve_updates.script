@@ -18,6 +18,9 @@ replace (
 )
 EOF
 
+echo "Updating docker dependency version to 27.1.1"
+go get github.com/docker/docker@v27.1.1+incompatible
+
 echo "Running go mod tidy"
 go mod tidy
 
