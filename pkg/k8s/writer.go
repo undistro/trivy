@@ -17,7 +17,7 @@ func Write(ctx context.Context, k8sreport report.Report, option report.Option) e
 
 	switch option.Format {
 	case types.FormatJSON:
-		jwriter := report.JSONWriter{
+		jwriter := report.JSONStreamWriter{
 			Output: option.Output,
 			Report: option.Report,
 		}
