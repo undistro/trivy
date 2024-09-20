@@ -14,7 +14,8 @@ go get google.golang.org/grpc@v1.64.1
 echo "Patching go.mod to use the patched trivy-kubernetes library"
 cat - >> go.mod << EOF
 replace (
-       github.com/aquasecurity/trivy-kubernetes => github.com/aquasecurity/trivy-kubernetes v0.0.0-20240626072334-56e5b9a42649
+        github.com/aquasecurity/trivy-kubernetes => github.com/aquasecurity/trivy-kubernetes v0.0.0-20240626072334-56e5b9a42649
+        github.com/open-policy-agent/opa => github.com/open-policy-agent/opa v0.68.0
 )
 EOF
 
