@@ -25,7 +25,7 @@ func NewFSCache(cacheDir string) (FSCache, error) {
 		return FSCache{}, xerrors.Errorf("failed to create cache dir: %w", err)
 	}
 
-	db, err := bolt.Open(filepath.Join(dir, "fanal.db"), 0600, nil)
+	db, err := bolt.Open(filepath.Join(dir, "fanal.db"), 0660, nil)
 	if err != nil {
 		return FSCache{}, xerrors.Errorf("unable to open DB: %w", err)
 	}
