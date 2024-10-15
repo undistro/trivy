@@ -26,6 +26,26 @@ import (
 
 type Descriptor = remote.Descriptor
 
+// Copied from go-containerregistry and augmented for rate limiting
+var defaultRetryStatusCodes = []int{
+	http.StatusRequestTimeout,
+	http.StatusInternalServerError,
+	http.StatusBadGateway,
+	http.StatusServiceUnavailable,
+	http.StatusGatewayTimeout,
+	499, // nginx-specific, client closed request
+	522, // Cloudflare-specific, connection timeout
+	http.StatusTooManyRequests,
+}
+
+// Default retry backoff with duration of 0.5s, factor of 2 and step count of 7
+var defaultRetryBackoff = remote.Backoff{
+	Duration: 500 * time.Millisecond,
+	Factor:   2.0,
+	Jitter:   0.1,
+	Steps:    7,
+}
+
 // Get is a wrapper of google/go-containerregistry/pkg/v1/remote.Get
 // so that it can try multiple authentication methods.
 func Get(ctx context.Context, ref name.Reference, option types.RegistryOptions) (*Descriptor, error) {
@@ -40,6 +60,8 @@ func Get(ctx context.Context, ref name.Reference, option types.RegistryOptions) 
 		remoteOpts := []remote.Option{
 			remote.WithTransport(tr),
 			authOpt,
+			remote.WithRetryStatusCodes(defaultRetryStatusCodes...),
+			remote.WithRetryBackoff(defaultRetryBackoff),
 		}
 
 		if option.Platform.Platform != nil {
@@ -85,6 +107,8 @@ func Image(ctx context.Context, ref name.Reference, option types.RegistryOptions
 		remoteOpts := []remote.Option{
 			remote.WithTransport(tr),
 			authOpt,
+			remote.WithRetryStatusCodes(defaultRetryStatusCodes...),
+			remote.WithRetryBackoff(defaultRetryBackoff),
 		}
 		index, err := remote.Image(ref, remoteOpts...)
 		if err != nil {
@@ -112,6 +136,8 @@ func Referrers(ctx context.Context, d name.Digest, option types.RegistryOptions)
 		remoteOpts := []remote.Option{
 			remote.WithTransport(tr),
 			authOpt,
+			remote.WithRetryStatusCodes(defaultRetryStatusCodes...),
+			remote.WithRetryBackoff(defaultRetryBackoff),
 		}
 		index, err := remote.Referrers(d, remoteOpts...)
 		if err != nil {
