@@ -1,0 +1,65 @@
+From fc256ca666ff742d65d46d4a80f00c44cc2f4528 Mon Sep 17 00:00:00 2001
+From: Kevin Conner <kev.conner@getupcloud.com>
+Date: Tue, 15 Oct 2024 14:26:23 -0700
+Subject: [PATCH] Add retries for 429 status code
+
+Signed-off-by: Kevin Conner <kev.conner@getupcloud.com>
+
+diff --git a/pkg/remote/remote.go b/pkg/remote/remote.go
+index 9e49e2e4f..a9de0f316 100644
+--- a/pkg/remote/remote.go
++++ b/pkg/remote/remote.go
+@@ -26,6 +26,26 @@ import (
+ 
+ type Descriptor = remote.Descriptor
+ 
++// Copied from go-containerregistry and augmented for rate limiting
++var defaultRetryStatusCodes = []int{
++	http.StatusRequestTimeout,
++	http.StatusInternalServerError,
++	http.StatusBadGateway,
++	http.StatusServiceUnavailable,
++	http.StatusGatewayTimeout,
++	499, // nginx-specific, client closed request
++	522, // Cloudflare-specific, connection timeout
++	http.StatusTooManyRequests,
++}
++
++// Default retry backoff with duration of 0.5s, factor of 2 and step count of 7
++var defaultRetryBackoff = remote.Backoff{
++	Duration: 500 * time.Millisecond,
++	Factor:   2.0,
++	Jitter:   0.1,
++	Steps:    7,
++}
++
+ // Get is a wrapper of google/go-containerregistry/pkg/v1/remote.Get
+ // so that it can try multiple authentication methods.
+ func Get(ctx context.Context, ref name.Reference, option types.RegistryOptions) (*Descriptor, error) {
+@@ -40,6 +60,8 @@ func Get(ctx context.Context, ref name.Reference, option types.RegistryOptions)
+ 		remoteOpts := []remote.Option{
+ 			remote.WithTransport(tr),
+ 			authOpt,
++			remote.WithRetryStatusCodes(defaultRetryStatusCodes...),
++			remote.WithRetryBackoff(defaultRetryBackoff),
+ 		}
+ 
+ 		if option.Platform.Platform != nil {
+@@ -85,6 +107,8 @@ func Image(ctx context.Context, ref name.Reference, option types.RegistryOptions
+ 		remoteOpts := []remote.Option{
+ 			remote.WithTransport(tr),
+ 			authOpt,
++			remote.WithRetryStatusCodes(defaultRetryStatusCodes...),
++			remote.WithRetryBackoff(defaultRetryBackoff),
+ 		}
+ 		index, err := remote.Image(ref, remoteOpts...)
+ 		if err != nil {
+@@ -112,6 +136,8 @@ func Referrers(ctx context.Context, d name.Digest, option types.RegistryOptions)
+ 		remoteOpts := []remote.Option{
+ 			remote.WithTransport(tr),
+ 			authOpt,
++			remote.WithRetryStatusCodes(defaultRetryStatusCodes...),
++			remote.WithRetryBackoff(defaultRetryBackoff),
+ 		}
+ 		index, err := remote.Referrers(d, remoteOpts...)
+ 		if err != nil {
