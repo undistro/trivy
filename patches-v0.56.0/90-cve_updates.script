@@ -1,0 +1,18 @@
+#!/bin/sh
+
+cd "$1"
+
+PATCH_GO_VERSION=$(egrep '^go ' go.mod | awk '{print $2}' | sed -e 's+^\([0-9]*\.[0-9]*\)[^0-9]*.*$+\1+')
+PATCH_GO_PATH="$(ls -d ${RUNNER_TOOL_CACHE}/go/${PATCH_GO_VERSION}.*/*/bin)"
+export PATH="${PATH}:${PATCH_GO_PATH}"
+
+echo "Patching go dependencies to address vulnerabilities"
+
+echo "Updating golang-jwt version to 4.5.1"
+go get github.com/golang-jwt/jwt/v4@v4.5.1
+
+echo "Running go mod tidy"
+go mod tidy
+
+echo "Running clean of the modcache"
+go clean -modcache
