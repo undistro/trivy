@@ -3,12 +3,16 @@ package remote
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"syscall"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/logs"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -25,6 +29,54 @@ import (
 )
 
 type Descriptor = remote.Descriptor
+
+// Copied from go-containerregistry and augmented for rate limiting
+var defaultRetryStatusCodes = []int{
+	http.StatusRequestTimeout,
+	http.StatusInternalServerError,
+	http.StatusBadGateway,
+	http.StatusServiceUnavailable,
+	http.StatusGatewayTimeout,
+	499, // nginx-specific, client closed request
+	522, // Cloudflare-specific, connection timeout
+	http.StatusTooManyRequests,
+}
+
+// Default retry backoff with duration of 0.5s, factor of 2 and step count of 6
+var defaultRetryBackoff = remote.Backoff{
+	Duration: 500 * time.Millisecond,
+	Factor:   2.0,
+	Jitter:   0.1,
+	Steps:    6,
+}
+
+// Copied from go-containerregistry
+type temporary interface {
+	Temporary() bool
+}
+
+// Copied from go-containerregistry
+// IsTemporary returns true if err implements Temporary() and it returns true.
+func IsTemporary(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if te, ok := err.(temporary); ok && te.Temporary() {
+		return true
+	}
+	return false
+}
+
+// Copied from go-containerregistry
+var defaultRetryPredicate = func(err error) bool {
+	// Various failure modes here, as we're often reading from and writing to
+	// the network.
+	if IsTemporary(err) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed) {
+		logs.Warn.Printf("retrying %v", err)
+		return true
+	}
+	return false
+}
 
 // Get is a wrapper of google/go-containerregistry/pkg/v1/remote.Get
 // so that it can try multiple authentication methods.
@@ -142,6 +194,12 @@ func httpTransport(option types.RegistryOptions) (http.RoundTripper, error) {
 	}
 
 	tripper := transport.NewUserAgent(tr, fmt.Sprintf("trivy/%s", app.Version()))
+	// Note: this retry will be wrapped by another retry backoff roundtrip, however the wrapping one is created
+	// using the default backoff information and ignores the information we are providing
+	tripper = transport.NewRetry(tripper,
+		transport.WithRetryPredicate(defaultRetryPredicate),
+		transport.WithRetryStatusCodes(defaultRetryStatusCodes...),
+		transport.WithRetryBackoff(defaultRetryBackoff))
 	return tripper, nil
 }
 
