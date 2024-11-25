@@ -1,0 +1,3518 @@
+commit 924508352b2891718d0aa2fc68ffc2ea1a9747fa
+Author: Kevin Conner <kev.conner@getupcloud.com>
+Date:   Wed Aug 21 15:24:19 2024 -0700
+
+    Add streaming output to trivy
+
+diff --git a/pkg/k8s/report/jsonstream.go b/pkg/k8s/report/jsonstream.go
+new file mode 100644
+index 000000000..fa2532c56
+--- /dev/null
++++ b/pkg/k8s/report/jsonstream.go
+@@ -0,0 +1,38 @@
++package report
++
++import (
++	"bufio"
++	"io"
++
++	"github.com/aquasecurity/trivy/pkg/utils/jsonstream"
++	"golang.org/x/xerrors"
++)
++
++type JSONStreamWriter struct {
++	Output io.Writer
++	Report string
++}
++
++// Write writes the results in JSON format
++func (jw JSONStreamWriter) Write(report Report) error {
++	var err error
++	bufWriter := bufio.NewWriter(jw.Output)
++	defer bufWriter.Flush()
++
++	switch jw.Report {
++	case AllReport:
++		err = jsonstream.Marshal(bufWriter, report)
++		if err != nil {
++			return xerrors.Errorf("failed to write json: %w", err)
++		}
++	case SummaryReport:
++		err = jsonstream.Marshal(bufWriter, report.consolidate())
++		if err != nil {
++			return xerrors.Errorf("failed to write json: %w", err)
++		}
++	default:
++		return xerrors.Errorf(`report %q not supported. Use "summary" or "all"`, jw.Report)
++	}
++
++	return nil
++}
+diff --git a/pkg/k8s/writer.go b/pkg/k8s/writer.go
+index abc5bb381..aa7ba5169 100644
+--- a/pkg/k8s/writer.go
++++ b/pkg/k8s/writer.go
+@@ -17,7 +17,7 @@ func Write(ctx context.Context, k8sreport report.Report, option report.Option) e
+ 
+ 	switch option.Format {
+ 	case types.FormatJSON:
+-		jwriter := report.JSONWriter{
++		jwriter := report.JSONStreamWriter{
+ 			Output: option.Output,
+ 			Report: option.Report,
+ 		}
+diff --git a/pkg/utils/jsonstream/encode.go b/pkg/utils/jsonstream/encode.go
+new file mode 100644
+index 000000000..d1f2f51e8
+--- /dev/null
++++ b/pkg/utils/jsonstream/encode.go
+@@ -0,0 +1,1234 @@
++// Copyright 2010 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++// Package jsonstream implements encoding and decoding of JSON as defined in
++// RFC 7159. The mapping between JSON and Go values is described
++// in the documentation for the Marshal and Unmarshal functions.
++//
++// This implementation is based on the Go json package version
++package jsonstream
++
++import (
++	"encoding"
++	"encoding/base64"
++	"encoding/json"
++	"fmt"
++	"io"
++	"math"
++	"reflect"
++	"slices"
++	"sort"
++	"strconv"
++	"strings"
++	"sync"
++	"unicode"
++	"unicode/utf8"
++)
++
++// Marshal streams the JSON encoding of v to the provided writer.
++//
++// Marshal traverses the value v recursively.
++// If an encountered value implements [Marshaler]
++// and is not a nil pointer, Marshal calls [Marshaler.MarshalJSON]
++// to produce JSON. If no [Marshaler.MarshalJSON] method is present but the
++// value implements [encoding.TextMarshaler] instead, Marshal calls
++// [encoding.TextMarshaler.MarshalText] and encodes the result as a JSON string.
++// The nil pointer exception is not strictly necessary
++// but mimics a similar, necessary exception in the behavior of
++// [Unmarshaler.UnmarshalJSON].
++//
++// Otherwise, Marshal uses the following type-dependent default encodings:
++//
++// Boolean values encode as JSON booleans.
++//
++// Floating point, integer, and [Number] values encode as JSON numbers.
++// NaN and +/-Inf values will return an [UnsupportedValueError].
++//
++// String values encode as JSON strings coerced to valid UTF-8,
++// replacing invalid bytes with the Unicode replacement rune.
++// So that the JSON will be safe to embed inside HTML <script> tags,
++// the string is encoded using [HTMLEscape],
++// which replaces "<", ">", "&", U+2028, and U+2029 are escaped
++// to "\u003c","\u003e", "\u0026", "\u2028", and "\u2029".
++// This replacement can be disabled when using an [Encoder],
++// by calling [Encoder.SetEscapeHTML](false).
++//
++// Array and slice values encode as JSON arrays, except that
++// []byte encodes as a base64-encoded string, and a nil slice
++// encodes as the null JSON value.
++//
++// Struct values encode as JSON objects.
++// Each exported struct field becomes a member of the object, using the
++// field name as the object key, unless the field is omitted for one of the
++// reasons given below.
++//
++// The encoding of each struct field can be customized by the format string
++// stored under the "json" key in the struct field's tag.
++// The format string gives the name of the field, possibly followed by a
++// comma-separated list of options. The name may be empty in order to
++// specify options without overriding the default field name.
++//
++// The "omitempty" option specifies that the field should be omitted
++// from the encoding if the field has an empty value, defined as
++// false, 0, a nil pointer, a nil interface value, and any empty array,
++// slice, map, or string.
++//
++// As a special case, if the field tag is "-", the field is always omitted.
++// Note that a field with name "-" can still be generated using the tag "-,".
++//
++// Examples of struct field tags and their meanings:
++//
++//	// Field appears in JSON as key "myName".
++//	Field int `json:"myName"`
++//
++//	// Field appears in JSON as key "myName" and
++//	// the field is omitted from the object if its value is empty,
++//	// as defined above.
++//	Field int `json:"myName,omitempty"`
++//
++//	// Field appears in JSON as key "Field" (the default), but
++//	// the field is skipped if empty.
++//	// Note the leading comma.
++//	Field int `json:",omitempty"`
++//
++//	// Field is ignored by this package.
++//	Field int `json:"-"`
++//
++//	// Field appears in JSON as key "-".
++//	Field int `json:"-,"`
++//
++// The "string" option signals that a field is stored as JSON inside a
++// JSON-encoded string. It applies only to fields of string, floating point,
++// integer, or boolean types. This extra level of encoding is sometimes used
++// when communicating with JavaScript programs:
++//
++//	Int64String int64 `json:",string"`
++//
++// The key name will be used if it's a non-empty string consisting of
++// only Unicode letters, digits, and ASCII punctuation except quotation
++// marks, backslash, and comma.
++//
++// Embedded struct fields are usually marshaled as if their inner exported fields
++// were fields in the outer struct, subject to the usual Go visibility rules amended
++// as described in the next paragraph.
++// An anonymous struct field with a name given in its JSON tag is treated as
++// having that name, rather than being anonymous.
++// An anonymous struct field of interface type is treated the same as having
++// that type as its name, rather than being anonymous.
++//
++// The Go visibility rules for struct fields are amended for JSON when
++// deciding which field to marshal or unmarshal. If there are
++// multiple fields at the same level, and that level is the least
++// nested (and would therefore be the nesting level selected by the
++// usual Go rules), the following extra rules apply:
++//
++// 1) Of those fields, if any are JSON-tagged, only tagged fields are considered,
++// even if there are multiple untagged fields that would otherwise conflict.
++//
++// 2) If there is exactly one field (tagged or not according to the first rule), that is selected.
++//
++// 3) Otherwise there are multiple fields, and all are ignored; no error occurs.
++//
++// Handling of anonymous struct fields is new in Go 1.1.
++// Prior to Go 1.1, anonymous struct fields were ignored. To force ignoring of
++// an anonymous struct field in both current and earlier versions, give the field
++// a JSON tag of "-".
++//
++// Map values encode as JSON objects. The map's key type must either be a
++// string, an integer type, or implement [encoding.TextMarshaler]. The map keys
++// are sorted and used as JSON object keys by applying the following rules,
++// subject to the UTF-8 coercion described for string values above:
++//   - keys of any string type are used directly
++//   - [encoding.TextMarshalers] are marshaled
++//   - integer keys are converted to strings
++//
++// Pointer values encode as the value pointed to.
++// A nil pointer encodes as the null JSON value.
++//
++// Interface values encode as the value contained in the interface.
++// A nil interface value encodes as the null JSON value.
++//
++// Channel, complex, and function values cannot be encoded in JSON.
++// Attempting to encode such a value causes Marshal to return
++// an [UnsupportedTypeError].
++//
++// JSON cannot represent cyclic data structures and Marshal does not
++// handle them. Passing cyclic structures to Marshal will result in
++// an error.
++func Marshal(writer io.Writer, v any) error {
++	e := newEncodeState(writer)
++
++	err := e.marshal(v, encOpts{escapeHTML: true})
++	if err != nil {
++		return err
++	}
++
++	return nil
++}
++
++var numberType = reflect.TypeFor[json.Number]()
++
++// A MarshalerError represents an error from calling a
++// [Marshaler.MarshalJSON] or [encoding.TextMarshaler.MarshalText] method.
++type MarshalerError struct {
++	Type       reflect.Type
++	Err        error
++	sourceFunc string
++}
++
++func (e *MarshalerError) Error() string {
++	srcFunc := e.sourceFunc
++	if srcFunc == "" {
++		srcFunc = "MarshalJSON"
++	}
++	return "json: error calling " + srcFunc +
++		" for type " + e.Type.String() +
++		": " + e.Err.Error()
++}
++
++// Unwrap returns the underlying error.
++func (e *MarshalerError) Unwrap() error { return e.Err }
++
++const hex = "0123456789abcdef"
++
++// An encodeState encodes JSON into a bytes.Buffer.
++type encodeState struct {
++	writer io.Writer
++
++	// Keep track of what pointers we've seen in the current recursive call
++	// path, to avoid cycles that could lead to a stack overflow. Only do
++	// the relatively expensive map operations if ptrLevel is larger than
++	// startDetectingCyclesAfter, so that we skip the work if we're within a
++	// reasonable amount of nested pointers deep.
++	ptrLevel uint
++	ptrSeen  map[any]struct{}
++}
++
++const startDetectingCyclesAfter = 1000
++
++func newEncodeState(writer io.Writer) *encodeState {
++	return &encodeState{writer: writer, ptrSeen: make(map[any]struct{})}
++}
++
++// jsonError is an error wrapper type for internal use only.
++// Panics with errors are wrapped in jsonError so that the top-level recover
++// can distinguish intentional panics from this package.
++type jsonError struct{ error }
++
++func (e *encodeState) marshal(v any, opts encOpts) (err error) {
++	defer func() {
++		if r := recover(); r != nil {
++			if je, ok := r.(jsonError); ok {
++				err = je.error
++			} else {
++				panic(r)
++			}
++		}
++	}()
++	e.reflectValue(reflect.ValueOf(v), opts)
++	return nil
++}
++
++// error aborts the encoding by panicking with err wrapped in jsonError.
++func (e *encodeState) error(err error) {
++	panic(jsonError{err})
++}
++
++func isEmptyValue(v reflect.Value) bool {
++	switch v.Kind() {
++	case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
++		return v.Len() == 0
++	case reflect.Bool,
++		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
++		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
++		reflect.Float32, reflect.Float64,
++		reflect.Interface, reflect.Pointer:
++		return v.IsZero()
++	}
++	return false
++}
++
++func (e *encodeState) reflectValue(v reflect.Value, opts encOpts) {
++	valueEncoder(v)(e, v, opts)
++}
++
++type encOpts struct {
++	// quoted causes primitive fields to be encoded inside JSON strings.
++	quoted bool
++	// escapeHTML causes '<', '>', and '&' to be escaped in JSON strings.
++	escapeHTML bool
++}
++
++type encoderFunc func(e *encodeState, v reflect.Value, opts encOpts)
++
++var encoderCache sync.Map // map[reflect.Type]encoderFunc
++
++func valueEncoder(v reflect.Value) encoderFunc {
++	if !v.IsValid() {
++		return invalidValueEncoder
++	}
++	return typeEncoder(v.Type())
++}
++
++func typeEncoder(t reflect.Type) encoderFunc {
++	if fi, ok := encoderCache.Load(t); ok {
++		return fi.(encoderFunc)
++	}
++
++	// To deal with recursive types, populate the map with an
++	// indirect func before we build it. This type waits on the
++	// real func (f) to be ready and then calls it. This indirect
++	// func is only used for recursive types.
++	var (
++		wg sync.WaitGroup
++		f  encoderFunc
++	)
++	wg.Add(1)
++	fi, loaded := encoderCache.LoadOrStore(t, encoderFunc(func(e *encodeState, v reflect.Value, opts encOpts) {
++		wg.Wait()
++		f(e, v, opts)
++	}))
++	if loaded {
++		return fi.(encoderFunc)
++	}
++
++	// Compute the real encoder and replace the indirect func with it.
++	f = newTypeEncoder(t, true)
++	wg.Done()
++	encoderCache.Store(t, f)
++	return f
++}
++
++var (
++	marshalerType     = reflect.TypeFor[json.Marshaler]()
++	textMarshalerType = reflect.TypeFor[encoding.TextMarshaler]()
++)
++
++// newTypeEncoder constructs an encoderFunc for a type.
++// The returned encoder only checks CanAddr when allowAddr is true.
++func newTypeEncoder(t reflect.Type, allowAddr bool) encoderFunc {
++	// If we have a non-pointer value whose type implements
++	// Marshaler with a value receiver, then we're better off taking
++	// the address of the value - otherwise we end up with an
++	// allocation as we cast the value to an interface.
++	if t.Kind() != reflect.Pointer && allowAddr && reflect.PointerTo(t).Implements(marshalerType) {
++		return newCondAddrEncoder(addrMarshalerEncoder, newTypeEncoder(t, false))
++	}
++	if t.Implements(marshalerType) {
++		return marshalerEncoder
++	}
++	if t.Kind() != reflect.Pointer && allowAddr && reflect.PointerTo(t).Implements(textMarshalerType) {
++		return newCondAddrEncoder(addrTextMarshalerEncoder, newTypeEncoder(t, false))
++	}
++	if t.Implements(textMarshalerType) {
++		return textMarshalerEncoder
++	}
++
++	switch t.Kind() {
++	case reflect.Bool:
++		return boolEncoder
++	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
++		return intEncoder
++	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
++		return uintEncoder
++	case reflect.Float32:
++		return float32Encoder
++	case reflect.Float64:
++		return float64Encoder
++	case reflect.String:
++		return stringEncoder
++	case reflect.Interface:
++		return interfaceEncoder
++	case reflect.Struct:
++		return newStructEncoder(t)
++	case reflect.Map:
++		return newMapEncoder(t)
++	case reflect.Slice:
++		return newSliceEncoder(t)
++	case reflect.Array:
++		return newArrayEncoder(t)
++	case reflect.Pointer:
++		return newPtrEncoder(t)
++	default:
++		return unsupportedTypeEncoder
++	}
++}
++
++func invalidValueEncoder(e *encodeState, v reflect.Value, _ encOpts) {
++	e.writer.Write([]byte("null"))
++}
++
++func marshalerEncoder(e *encodeState, v reflect.Value, opts encOpts) {
++	if v.Kind() == reflect.Pointer && v.IsNil() {
++		e.writer.Write([]byte("null"))
++		return
++	}
++	m, ok := v.Interface().(json.Marshaler)
++	if !ok {
++		e.writer.Write([]byte("null"))
++		return
++	}
++	b, err := m.MarshalJSON()
++	if err == nil {
++		ew := newEscapeWriter(e.writer, opts.escapeHTML)
++		_, err = ew.Write(b)
++		if err == nil {
++			err = ew.checkEnd()
++		}
++	}
++	if err != nil {
++		e.error(&MarshalerError{v.Type(), err, "MarshalJSON"})
++	}
++}
++
++func addrMarshalerEncoder(e *encodeState, v reflect.Value, opts encOpts) {
++	va := v.Addr()
++	if va.IsNil() {
++		e.writer.Write([]byte("null"))
++		return
++	}
++	m := va.Interface().(json.Marshaler)
++	b, err := m.MarshalJSON()
++	if err == nil {
++		ew := newEscapeWriter(e.writer, opts.escapeHTML)
++		_, err = ew.Write(b)
++		if err == nil {
++			err = ew.checkEnd()
++		}
++	}
++	if err != nil {
++		e.error(&MarshalerError{v.Type(), err, "MarshalJSON"})
++	}
++}
++
++func textMarshalerEncoder(e *encodeState, v reflect.Value, opts encOpts) {
++	if v.Kind() == reflect.Pointer && v.IsNil() {
++		e.writer.Write([]byte("null"))
++		return
++	}
++	m, ok := v.Interface().(encoding.TextMarshaler)
++	if !ok {
++		e.writer.Write([]byte("null"))
++		return
++	}
++	b, err := m.MarshalText()
++	if err != nil {
++		e.error(&MarshalerError{v.Type(), err, "MarshalText"})
++	}
++	e.writer.Write(appendString([]byte{}, b, opts.escapeHTML))
++}
++
++func addrTextMarshalerEncoder(e *encodeState, v reflect.Value, opts encOpts) {
++	va := v.Addr()
++	if va.IsNil() {
++		e.writer.Write([]byte("null"))
++		return
++	}
++	m := va.Interface().(encoding.TextMarshaler)
++	b, err := m.MarshalText()
++	if err != nil {
++		e.error(&MarshalerError{v.Type(), err, "MarshalText"})
++	}
++	e.writer.Write(appendString([]byte{}, b, opts.escapeHTML))
++}
++
++func boolEncoder(e *encodeState, v reflect.Value, opts encOpts) {
++	b := []byte{}
++	b = mayAppendQuote(b, opts.quoted)
++	b = strconv.AppendBool(b, v.Bool())
++	b = mayAppendQuote(b, opts.quoted)
++	e.writer.Write(b)
++}
++
++func intEncoder(e *encodeState, v reflect.Value, opts encOpts) {
++	b := []byte{}
++	b = mayAppendQuote(b, opts.quoted)
++	b = strconv.AppendInt(b, v.Int(), 10)
++	b = mayAppendQuote(b, opts.quoted)
++	e.writer.Write(b)
++}
++
++func uintEncoder(e *encodeState, v reflect.Value, opts encOpts) {
++	b := []byte{}
++	b = mayAppendQuote(b, opts.quoted)
++	b = strconv.AppendUint(b, v.Uint(), 10)
++	b = mayAppendQuote(b, opts.quoted)
++	e.writer.Write(b)
++}
++
++type floatEncoder int // number of bits
++
++func (bits floatEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
++	f := v.Float()
++	if math.IsInf(f, 0) || math.IsNaN(f) {
++		e.error(&json.UnsupportedValueError{Value: v, Str: strconv.FormatFloat(f, 'g', -1, int(bits))})
++	}
++
++	// Convert as if by ES6 number to string conversion.
++	// This matches most other JSON generators.
++	// See golang.org/issue/6384 and golang.org/issue/14135.
++	// Like fmt %g, but the exponent cutoffs are different
++	// and exponents themselves are not padded to two digits.
++	b := []byte{}
++	b = mayAppendQuote(b, opts.quoted)
++	abs := math.Abs(f)
++	fmt := byte('f')
++	// Note: Must use float32 comparisons for underlying float32 value to get precise cutoffs right.
++	if abs != 0 {
++		if bits == 64 && (abs < 1e-6 || abs >= 1e21) || bits == 32 && (float32(abs) < 1e-6 || float32(abs) >= 1e21) {
++			fmt = 'e'
++		}
++	}
++	b = strconv.AppendFloat(b, f, fmt, -1, int(bits))
++	if fmt == 'e' {
++		// clean up e-09 to e-9
++		n := len(b)
++		if n >= 4 && b[n-4] == 'e' && b[n-3] == '-' && b[n-2] == '0' {
++			b[n-2] = b[n-1]
++			b = b[:n-1]
++		}
++	}
++	b = mayAppendQuote(b, opts.quoted)
++	e.writer.Write(b)
++}
++
++var (
++	float32Encoder = (floatEncoder(32)).encode
++	float64Encoder = (floatEncoder(64)).encode
++)
++
++func stringEncoder(e *encodeState, v reflect.Value, opts encOpts) {
++	if v.Type() == numberType {
++		numStr := v.String()
++		// In Go1.5 the empty string encodes to "0", while this is not a valid number literal
++		// we keep compatibility so check validity after this.
++		if numStr == "" {
++			numStr = "0" // Number's zero-val
++		}
++		if !isValidNumber(numStr) {
++			e.error(fmt.Errorf("json: invalid number literal %q", numStr))
++		}
++		b := []byte{}
++		b = mayAppendQuote(b, opts.quoted)
++		b = append(b, numStr...)
++		b = mayAppendQuote(b, opts.quoted)
++		e.writer.Write(b)
++		return
++	}
++	if opts.quoted {
++		b := appendString(nil, v.String(), opts.escapeHTML)
++		e.writer.Write(appendString([]byte{}, b, false)) // no need to escape again since it is already escaped
++	} else {
++		e.writer.Write(appendString([]byte{}, v.String(), opts.escapeHTML))
++	}
++}
++
++// isValidNumber reports whether s is a valid JSON number literal.
++func isValidNumber(s string) bool {
++	// This function implements the JSON numbers grammar.
++	// See https://tools.ietf.org/html/rfc7159#section-6
++	// and https://www.json.org/img/number.png
++
++	if s == "" {
++		return false
++	}
++
++	// Optional -
++	if s[0] == '-' {
++		s = s[1:]
++		if s == "" {
++			return false
++		}
++	}
++
++	// Digits
++	switch {
++	default:
++		return false
++
++	case s[0] == '0':
++		s = s[1:]
++
++	case '1' <= s[0] && s[0] <= '9':
++		s = s[1:]
++		for len(s) > 0 && '0' <= s[0] && s[0] <= '9' {
++			s = s[1:]
++		}
++	}
++
++	// . followed by 1 or more digits.
++	if len(s) >= 2 && s[0] == '.' && '0' <= s[1] && s[1] <= '9' {
++		s = s[2:]
++		for len(s) > 0 && '0' <= s[0] && s[0] <= '9' {
++			s = s[1:]
++		}
++	}
++
++	// e or E followed by an optional - or + and
++	// 1 or more digits.
++	if len(s) >= 2 && (s[0] == 'e' || s[0] == 'E') {
++		s = s[1:]
++		if s[0] == '+' || s[0] == '-' {
++			s = s[1:]
++			if s == "" {
++				return false
++			}
++		}
++		for len(s) > 0 && '0' <= s[0] && s[0] <= '9' {
++			s = s[1:]
++		}
++	}
++
++	// Make sure we are at the end.
++	return s == ""
++}
++
++func interfaceEncoder(e *encodeState, v reflect.Value, opts encOpts) {
++	if v.IsNil() {
++		e.writer.Write([]byte("null"))
++		return
++	}
++	e.reflectValue(v.Elem(), opts)
++}
++
++func unsupportedTypeEncoder(e *encodeState, v reflect.Value, _ encOpts) {
++	e.error(&json.UnsupportedTypeError{v.Type()})
++}
++
++type structEncoder struct {
++	fields structFields
++}
++
++type structFields struct {
++	list         []field
++	byExactName  map[string]*field
++	byFoldedName map[string]*field
++}
++
++func (se structEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
++	next := byte('{')
++FieldLoop:
++	for i := range se.fields.list {
++		f := &se.fields.list[i]
++
++		// Find the nested struct field by following f.index.
++		fv := v
++		for _, i := range f.index {
++			if fv.Kind() == reflect.Pointer {
++				if fv.IsNil() {
++					continue FieldLoop
++				}
++				fv = fv.Elem()
++			}
++			fv = fv.Field(i)
++		}
++
++		if f.omitEmpty && isEmptyValue(fv) {
++			continue
++		}
++		e.writer.Write([]byte{next})
++		next = ','
++		if opts.escapeHTML {
++			e.writer.Write([]byte(f.nameEscHTML))
++		} else {
++			e.writer.Write([]byte(f.nameNonEsc))
++		}
++		opts.quoted = f.quoted
++		f.encoder(e, fv, opts)
++	}
++	if next == '{' {
++		e.writer.Write([]byte("{}"))
++	} else {
++		e.writer.Write([]byte{'}'})
++	}
++}
++
++func newStructEncoder(t reflect.Type) encoderFunc {
++	se := structEncoder{fields: cachedTypeFields(t)}
++	return se.encode
++}
++
++type mapEncoder struct {
++	elemEnc encoderFunc
++}
++
++func (me mapEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
++	if v.IsNil() {
++		e.writer.Write([]byte("null"))
++		return
++	}
++	if e.ptrLevel++; e.ptrLevel > startDetectingCyclesAfter {
++		// We're a large number of nested ptrEncoder.encode calls deep;
++		// start checking if we've run into a pointer cycle.
++		ptr := v.UnsafePointer()
++		if _, ok := e.ptrSeen[ptr]; ok {
++			e.error(&json.UnsupportedValueError{Value: v, Str: fmt.Sprintf("encountered a cycle via %s", v.Type())})
++		}
++		e.ptrSeen[ptr] = struct{}{}
++		defer delete(e.ptrSeen, ptr)
++	}
++	e.writer.Write([]byte{'{'})
++
++	// Extract and sort the keys.
++	var (
++		sv  = make([]reflectWithString, v.Len())
++		mi  = v.MapRange()
++		err error
++	)
++	for i := 0; mi.Next(); i++ {
++		if sv[i].ks, err = resolveKeyName(mi.Key()); err != nil {
++			e.error(fmt.Errorf("json: encoding error for type %q: %q", v.Type().String(), err.Error()))
++		}
++		sv[i].v = mi.Value()
++	}
++	slices.SortFunc(sv, func(i, j reflectWithString) int {
++		return strings.Compare(i.ks, j.ks)
++	})
++
++	for i, kv := range sv {
++		if i > 0 {
++			e.writer.Write([]byte{','})
++		}
++		e.writer.Write(appendString([]byte{}, kv.ks, opts.escapeHTML))
++		e.writer.Write([]byte{':'})
++		me.elemEnc(e, kv.v, opts)
++	}
++	e.writer.Write([]byte{'}'})
++	e.ptrLevel--
++}
++
++func newMapEncoder(t reflect.Type) encoderFunc {
++	switch t.Key().Kind() {
++	case reflect.String,
++		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
++		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
++	default:
++		if !t.Key().Implements(textMarshalerType) {
++			return unsupportedTypeEncoder
++		}
++	}
++	me := mapEncoder{typeEncoder(t.Elem())}
++	return me.encode
++}
++
++func encodeByteSlice(e *encodeState, v reflect.Value, _ encOpts) {
++	if v.IsNil() {
++		e.writer.Write([]byte("null"))
++		return
++	}
++
++	s := v.Bytes()
++	b := []byte{}
++	b = append(b, '"')
++	b = base64.StdEncoding.AppendEncode(b, s)
++	b = append(b, '"')
++	e.writer.Write(b)
++}
++
++// sliceEncoder just wraps an arrayEncoder, checking to make sure the value isn't nil.
++type sliceEncoder struct {
++	arrayEnc encoderFunc
++}
++
++func (se sliceEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
++	if v.IsNil() {
++		e.writer.Write([]byte("null"))
++		return
++	}
++	if e.ptrLevel++; e.ptrLevel > startDetectingCyclesAfter {
++		// We're a large number of nested ptrEncoder.encode calls deep;
++		// start checking if we've run into a pointer cycle.
++		// Here we use a struct to memorize the pointer to the first element of the slice
++		// and its length.
++		ptr := struct {
++			ptr interface{} // always an unsafe.Pointer, but avoids a dependency on package unsafe
++			len int
++		}{v.UnsafePointer(), v.Len()}
++		if _, ok := e.ptrSeen[ptr]; ok {
++			e.error(&json.UnsupportedValueError{Value: v, Str: fmt.Sprintf("encountered a cycle via %s", v.Type())})
++		}
++		e.ptrSeen[ptr] = struct{}{}
++		defer delete(e.ptrSeen, ptr)
++	}
++	se.arrayEnc(e, v, opts)
++	e.ptrLevel--
++}
++
++func newSliceEncoder(t reflect.Type) encoderFunc {
++	// Byte slices get special treatment; arrays don't.
++	if t.Elem().Kind() == reflect.Uint8 {
++		p := reflect.PointerTo(t.Elem())
++		if !p.Implements(marshalerType) && !p.Implements(textMarshalerType) {
++			return encodeByteSlice
++		}
++	}
++	enc := sliceEncoder{newArrayEncoder(t)}
++	return enc.encode
++}
++
++type arrayEncoder struct {
++	elemEnc encoderFunc
++}
++
++func (ae arrayEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
++	e.writer.Write([]byte{'['})
++	n := v.Len()
++	for i := 0; i < n; i++ {
++		if i > 0 {
++			e.writer.Write([]byte{','})
++		}
++		ae.elemEnc(e, v.Index(i), opts)
++	}
++	e.writer.Write([]byte{']'})
++}
++
++func newArrayEncoder(t reflect.Type) encoderFunc {
++	enc := arrayEncoder{typeEncoder(t.Elem())}
++	return enc.encode
++}
++
++type ptrEncoder struct {
++	elemEnc encoderFunc
++}
++
++func (pe ptrEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
++	if v.IsNil() {
++		e.writer.Write([]byte("null"))
++		return
++	}
++	if e.ptrLevel++; e.ptrLevel > startDetectingCyclesAfter {
++		// We're a large number of nested ptrEncoder.encode calls deep;
++		// start checking if we've run into a pointer cycle.
++		ptr := v.Interface()
++		if _, ok := e.ptrSeen[ptr]; ok {
++			e.error(&json.UnsupportedValueError{Value: v, Str: fmt.Sprintf("encountered a cycle via %s", v.Type())})
++		}
++		e.ptrSeen[ptr] = struct{}{}
++		defer delete(e.ptrSeen, ptr)
++	}
++	pe.elemEnc(e, v.Elem(), opts)
++	e.ptrLevel--
++}
++
++func newPtrEncoder(t reflect.Type) encoderFunc {
++	enc := ptrEncoder{typeEncoder(t.Elem())}
++	return enc.encode
++}
++
++type condAddrEncoder struct {
++	canAddrEnc, elseEnc encoderFunc
++}
++
++func (ce condAddrEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
++	if v.CanAddr() {
++		ce.canAddrEnc(e, v, opts)
++	} else {
++		ce.elseEnc(e, v, opts)
++	}
++}
++
++// newCondAddrEncoder returns an encoder that checks whether its value
++// CanAddr and delegates to canAddrEnc if so, else to elseEnc.
++func newCondAddrEncoder(canAddrEnc, elseEnc encoderFunc) encoderFunc {
++	enc := condAddrEncoder{canAddrEnc: canAddrEnc, elseEnc: elseEnc}
++	return enc.encode
++}
++
++func isValidTag(s string) bool {
++	if s == "" {
++		return false
++	}
++	for _, c := range s {
++		switch {
++		case strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", c):
++			// Backslash and quote chars are reserved, but
++			// otherwise any punctuation chars are allowed
++			// in a tag name.
++		case !unicode.IsLetter(c) && !unicode.IsDigit(c):
++			return false
++		}
++	}
++	return true
++}
++
++func typeByIndex(t reflect.Type, index []int) reflect.Type {
++	for _, i := range index {
++		if t.Kind() == reflect.Pointer {
++			t = t.Elem()
++		}
++		t = t.Field(i).Type
++	}
++	return t
++}
++
++type reflectWithString struct {
++	v  reflect.Value
++	ks string
++}
++
++func resolveKeyName(k reflect.Value) (string, error) {
++	if k.Kind() == reflect.String {
++		return k.String(), nil
++	}
++	if tm, ok := k.Interface().(encoding.TextMarshaler); ok {
++		if k.Kind() == reflect.Pointer && k.IsNil() {
++			return "", nil
++		}
++		buf, err := tm.MarshalText()
++		return string(buf), err
++	}
++	switch k.Kind() {
++	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
++		return strconv.FormatInt(k.Int(), 10), nil
++	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
++		return strconv.FormatUint(k.Uint(), 10), nil
++	}
++	panic("unexpected map key type")
++}
++
++func appendString[Bytes []byte | string](dst []byte, src Bytes, escapeHTML bool) []byte {
++	dst = append(dst, '"')
++	start := 0
++	for i := 0; i < len(src); {
++		if b := src[i]; b < utf8.RuneSelf {
++			if htmlSafeSet[b] || (!escapeHTML && safeSet[b]) {
++				i++
++				continue
++			}
++			dst = append(dst, src[start:i]...)
++			switch b {
++			case '\\', '"':
++				dst = append(dst, '\\', b)
++			case '\b':
++				dst = append(dst, '\\', 'b')
++			case '\f':
++				dst = append(dst, '\\', 'f')
++			case '\n':
++				dst = append(dst, '\\', 'n')
++			case '\r':
++				dst = append(dst, '\\', 'r')
++			case '\t':
++				dst = append(dst, '\\', 't')
++			default:
++				// This encodes bytes < 0x20 except for \b, \f, \n, \r and \t.
++				// If escapeHTML is set, it also escapes <, >, and &
++				// because they can lead to security holes when
++				// user-controlled strings are rendered into JSON
++				// and served to some browsers.
++				dst = append(dst, '\\', 'u', '0', '0', hex[b>>4], hex[b&0xF])
++			}
++			i++
++			start = i
++			continue
++		}
++		// TODO(https://go.dev/issue/56948): Use generic utf8 functionality.
++		// For now, cast only a small portion of byte slices to a string
++		// so that it can be stack allocated. This slows down []byte slightly
++		// due to the extra copy, but keeps string performance roughly the same.
++		n := len(src) - i
++		if n > utf8.UTFMax {
++			n = utf8.UTFMax
++		}
++		c, size := utf8.DecodeRuneInString(string(src[i : i+n]))
++		if c == utf8.RuneError && size == 1 {
++			dst = append(dst, src[start:i]...)
++			dst = append(dst, `\ufffd`...)
++			i += size
++			start = i
++			continue
++		}
++		// U+2028 is LINE SEPARATOR.
++		// U+2029 is PARAGRAPH SEPARATOR.
++		// They are both technically valid characters in JSON strings,
++		// but don't work in JSONP, which has to be evaluated as JavaScript,
++		// and can lead to security holes there. It is valid JSON to
++		// escape them, so we do so unconditionally.
++		// See https://en.wikipedia.org/wiki/JSON#Safety.
++		if c == '\u2028' || c == '\u2029' {
++			dst = append(dst, src[start:i]...)
++			dst = append(dst, '\\', 'u', '2', '0', '2', hex[c&0xF])
++			i += size
++			start = i
++			continue
++		}
++		i += size
++	}
++	dst = append(dst, src[start:]...)
++	dst = append(dst, '"')
++	return dst
++}
++
++// A field represents a single field found in a struct.
++type field struct {
++	name      string
++	nameBytes []byte // []byte(name)
++
++	nameNonEsc  string // `"` + name + `":`
++	nameEscHTML string // `"` + HTMLEscape(name) + `":`
++
++	tag       bool
++	index     []int
++	typ       reflect.Type
++	omitEmpty bool
++	quoted    bool
++
++	encoder encoderFunc
++}
++
++// byIndex sorts field by index sequence.
++type byIndex []field
++
++func (x byIndex) Len() int { return len(x) }
++
++func (x byIndex) Swap(i, j int) { x[i], x[j] = x[j], x[i] }
++
++func (x byIndex) Less(i, j int) bool {
++	for k, xik := range x[i].index {
++		if k >= len(x[j].index) {
++			return false
++		}
++		if xik != x[j].index[k] {
++			return xik < x[j].index[k]
++		}
++	}
++	return len(x[i].index) < len(x[j].index)
++}
++
++// typeFields returns a list of fields that JSON should recognize for the given type.
++// The algorithm is breadth-first search over the set of structs to include - the top struct
++// and then any reachable anonymous structs.
++func typeFields(t reflect.Type) structFields {
++	// Anonymous fields to explore at the current level and the next.
++	current := []field{}
++	next := []field{{typ: t}}
++
++	// Count of queued names for current level and the next.
++	var count, nextCount map[reflect.Type]int
++
++	// Types already visited at an earlier level.
++	visited := map[reflect.Type]bool{}
++
++	// Fields found.
++	var fields []field
++
++	// Buffer to run appendHTMLEscape on field names.
++	var nameEscBuf []byte
++
++	for len(next) > 0 {
++		current, next = next, current[:0]
++		count, nextCount = nextCount, map[reflect.Type]int{}
++
++		for _, f := range current {
++			if visited[f.typ] {
++				continue
++			}
++			visited[f.typ] = true
++
++			// Scan f.typ for fields to include.
++			for i := 0; i < f.typ.NumField(); i++ {
++				sf := f.typ.Field(i)
++				if sf.Anonymous {
++					t := sf.Type
++					if t.Kind() == reflect.Pointer {
++						t = t.Elem()
++					}
++					if !sf.IsExported() && t.Kind() != reflect.Struct {
++						// Ignore embedded fields of unexported non-struct types.
++						continue
++					}
++					// Do not ignore embedded fields of unexported struct types
++					// since they may have exported fields.
++				} else if !sf.IsExported() {
++					// Ignore unexported non-embedded fields.
++					continue
++				}
++				tag := sf.Tag.Get("json")
++				if tag == "-" {
++					continue
++				}
++				name, opts := parseTag(tag)
++				if !isValidTag(name) {
++					name = ""
++				}
++				index := make([]int, len(f.index)+1)
++				copy(index, f.index)
++				index[len(f.index)] = i
++
++				ft := sf.Type
++				if ft.Name() == "" && ft.Kind() == reflect.Pointer {
++					// Follow pointer.
++					ft = ft.Elem()
++				}
++
++				// Only strings, floats, integers, and booleans can be quoted.
++				quoted := false
++				if opts.Contains("string") {
++					switch ft.Kind() {
++					case reflect.Bool,
++						reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
++						reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
++						reflect.Float32, reflect.Float64,
++						reflect.String:
++						quoted = true
++					}
++				}
++
++				// Record found field and index sequence.
++				if name != "" || !sf.Anonymous || ft.Kind() != reflect.Struct {
++					tagged := name != ""
++					if name == "" {
++						name = sf.Name
++					}
++					field := field{
++						name:      name,
++						tag:       tagged,
++						index:     index,
++						typ:       ft,
++						omitEmpty: opts.Contains("omitempty"),
++						quoted:    quoted,
++					}
++					field.nameBytes = []byte(field.name)
++
++					// Build nameEscHTML and nameNonEsc ahead of time.
++					nameEscBuf = appendHTMLEscape(nameEscBuf[:0], field.nameBytes)
++					field.nameEscHTML = `"` + string(nameEscBuf) + `":`
++					field.nameNonEsc = `"` + field.name + `":`
++
++					fields = append(fields, field)
++					if count[f.typ] > 1 {
++						// If there were multiple instances, add a second,
++						// so that the annihilation code will see a duplicate.
++						// It only cares about the distinction between 1 and 2,
++						// so don't bother generating any more copies.
++						fields = append(fields, fields[len(fields)-1])
++					}
++					continue
++				}
++
++				// Record new anonymous struct to explore in next round.
++				nextCount[ft]++
++				if nextCount[ft] == 1 {
++					next = append(next, field{name: ft.Name(), index: index, typ: ft})
++				}
++			}
++		}
++	}
++
++	sort.Slice(fields, func(i, j int) bool {
++		x := fields
++		// sort field by name, breaking ties with depth, then
++		// breaking ties with "name came from json tag", then
++		// breaking ties with index sequence.
++		if x[i].name != x[j].name {
++			return x[i].name < x[j].name
++		}
++		if len(x[i].index) != len(x[j].index) {
++			return len(x[i].index) < len(x[j].index)
++		}
++		if x[i].tag != x[j].tag {
++			return x[i].tag
++		}
++		return byIndex(x).Less(i, j)
++	})
++
++	// Delete all fields that are hidden by the Go rules for embedded fields,
++	// except that fields with JSON tags are promoted.
++
++	// The fields are sorted in primary order of name, secondary order
++	// of field index length. Loop over names; for each name, delete
++	// hidden fields by choosing the one dominant field that survives.
++	out := fields[:0]
++	for advance, i := 0, 0; i < len(fields); i += advance {
++		// One iteration per name.
++		// Find the sequence of fields with the name of this first field.
++		fi := fields[i]
++		name := fi.name
++		for advance = 1; i+advance < len(fields); advance++ {
++			fj := fields[i+advance]
++			if fj.name != name {
++				break
++			}
++		}
++		if advance == 1 { // Only one field with this name
++			out = append(out, fi)
++			continue
++		}
++		dominant, ok := dominantField(fields[i : i+advance])
++		if ok {
++			out = append(out, dominant)
++		}
++	}
++
++	fields = out
++	sort.Sort(byIndex(fields))
++
++	for i := range fields {
++		f := &fields[i]
++		f.encoder = typeEncoder(typeByIndex(t, f.index))
++	}
++	exactNameIndex := make(map[string]*field, len(fields))
++	foldedNameIndex := make(map[string]*field, len(fields))
++	for i, field := range fields {
++		exactNameIndex[field.name] = &fields[i]
++		// For historical reasons, first folded match takes precedence.
++		if _, ok := foldedNameIndex[string(foldName(field.nameBytes))]; !ok {
++			foldedNameIndex[string(foldName(field.nameBytes))] = &fields[i]
++		}
++	}
++	return structFields{fields, exactNameIndex, foldedNameIndex}
++}
++
++// dominantField looks through the fields, all of which are known to
++// have the same name, to find the single field that dominates the
++// others using Go's embedding rules, modified by the presence of
++// JSON tags. If there are multiple top-level fields, the boolean
++// will be false: This condition is an error in Go and we skip all
++// the fields.
++func dominantField(fields []field) (field, bool) {
++	// The fields are sorted in increasing index-length order, then by presence of tag.
++	// That means that the first field is the dominant one. We need only check
++	// for error cases: two fields at top level, either both tagged or neither tagged.
++	if len(fields) > 1 && len(fields[0].index) == len(fields[1].index) && fields[0].tag == fields[1].tag {
++		return field{}, false
++	}
++	return fields[0], true
++}
++
++var fieldCache sync.Map // map[reflect.Type]structFields
++
++// cachedTypeFields is like typeFields but uses a cache to avoid repeated work.
++func cachedTypeFields(t reflect.Type) structFields {
++	if f, ok := fieldCache.Load(t); ok {
++		return f.(structFields)
++	}
++	f, _ := fieldCache.LoadOrStore(t, typeFields(t))
++	return f.(structFields)
++}
++
++func mayAppendQuote(b []byte, quoted bool) []byte {
++	if quoted {
++		b = append(b, '"')
++	}
++	return b
++}
++
++func appendHTMLEscape(dst, src []byte) []byte {
++	// The characters can only appear in string literals,
++	// so just scan the string one byte at a time.
++	start := 0
++	for i, c := range src {
++		if c == '<' || c == '>' || c == '&' {
++			dst = append(dst, src[start:i]...)
++			dst = append(dst, '\\', 'u', '0', '0', hex[c>>4], hex[c&0xF])
++			start = i + 1
++		}
++		// Convert U+2028 and U+2029 (E2 80 A8 and E2 80 A9).
++		if c == 0xE2 && i+2 < len(src) && src[i+1] == 0x80 && src[i+2]&^1 == 0xA8 {
++			dst = append(dst, src[start:i]...)
++			dst = append(dst, '\\', 'u', '2', '0', '2', hex[src[i+2]&0xF])
++			start = i + len("\u2029")
++		}
++	}
++	return append(dst, src[start:]...)
++}
+diff --git a/pkg/utils/jsonstream/encode_test.go b/pkg/utils/jsonstream/encode_test.go
+new file mode 100644
+index 000000000..f5ebecfe0
+--- /dev/null
++++ b/pkg/utils/jsonstream/encode_test.go
+@@ -0,0 +1,1221 @@
++// Copyright 2011 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package jsonstream
++
++import (
++	"bytes"
++	"encoding"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"log"
++	"math"
++	"reflect"
++	"regexp"
++	"runtime/debug"
++	"strconv"
++	"testing"
++)
++
++type Optionals struct {
++	Sr string `json:"sr"`
++	So string `json:"so,omitempty"`
++	Sw string `json:"-"`
++
++	Ir int `json:"omitempty"` // actually named omitempty, not an option
++	Io int `json:"io,omitempty"`
++
++	Slr []string `json:"slr,random"`
++	Slo []string `json:"slo,omitempty"`
++
++	Mr map[string]any `json:"mr"`
++	Mo map[string]any `json:",omitempty"`
++
++	Fr float64 `json:"fr"`
++	Fo float64 `json:"fo,omitempty"`
++
++	Br bool `json:"br"`
++	Bo bool `json:"bo,omitempty"`
++
++	Ur uint `json:"ur"`
++	Uo uint `json:"uo,omitempty"`
++
++	Str struct{} `json:"str"`
++	Sto struct{} `json:"sto,omitempty"`
++}
++
++func MarshalBytes(val any) ([]byte, error) {
++	buffer := bytes.NewBuffer(nil)
++	err := Marshal(buffer, val)
++	if err != nil {
++		return nil, err
++	} else {
++		return buffer.Bytes(), nil
++	}
++}
++
++func TestOmitEmpty(t *testing.T) {
++	var want = `{"sr":"","omitempty":0,"slr":null,"mr":{},"fr":0,"br":false,"ur":0,"str":{},"sto":{}}`
++	var o Optionals
++	o.Sw = "something"
++	o.Mr = map[string]any{}
++	o.Mo = map[string]any{}
++
++	got, err := MarshalBytes(&o)
++	if err != nil {
++		t.Fatalf("MarshalIndent error: %v", err)
++	}
++	if got := string(got); got != want {
++		t.Errorf("MarshalIndent:\n\tgot:  %s\n\twant: %s\n", got, want)
++	}
++}
++
++type StringTag struct {
++	BoolStr    bool        `json:",string"`
++	IntStr     int64       `json:",string"`
++	UintptrStr uintptr     `json:",string"`
++	StrStr     string      `json:",string"`
++	NumberStr  json.Number `json:",string"`
++}
++
++func TestRoundtripStringTag(t *testing.T) {
++	tests := []struct {
++		CaseName
++		in   StringTag
++		want string // empty to just test that we roundtrip
++	}{{
++		CaseName: Name("AllTypes"),
++		in: StringTag{
++			BoolStr:    true,
++			IntStr:     42,
++			UintptrStr: 44,
++			StrStr:     "xzbit",
++			NumberStr:  "46",
++		},
++		want: `{"BoolStr":"true","IntStr":"42","UintptrStr":"44","StrStr":"\"xzbit\"","NumberStr":"46"}`,
++	}, {
++		// See golang.org/issues/38173.
++		CaseName: Name("StringDoubleEscapes"),
++		in: StringTag{
++			StrStr:    "\b\f\n\r\t\"\\",
++			NumberStr: "0", // just to satisfy the roundtrip
++		},
++		want: `{"BoolStr":"false","IntStr":"0","UintptrStr":"0","StrStr":"\"\\b\\f\\n\\r\\t\\\"\\\\\"","NumberStr":"0"}`,
++	}}
++	for _, tt := range tests {
++		t.Run(tt.Name, func(t *testing.T) {
++			got, err := MarshalBytes(&tt.in)
++			if err != nil {
++				t.Fatalf("%s: MarshalIndent error: %v", tt.Where, err)
++			}
++			if got := string(got); got != tt.want {
++				t.Fatalf("%s: MarshalIndent:\n\tgot:  %s\n\twant: %s", tt.Where, got, tt.want)
++			}
++
++			// Verify that it round-trips.
++			var s2 StringTag
++			if err := json.Unmarshal(got, &s2); err != nil {
++				t.Fatalf("%s: Decode error: %v", tt.Where, err)
++			}
++			if !reflect.DeepEqual(s2, tt.in) {
++				t.Fatalf("%s: Decode:\n\tinput: %s\n\tgot:  %#v\n\twant: %#v", tt.Where, string(got), s2, tt.in)
++			}
++		})
++	}
++}
++
++// byte slices are special even if they're renamed types.
++type renamedByte byte
++type renamedByteSlice []byte
++type renamedRenamedByteSlice []renamedByte
++
++func TestEncodeRenamedByteSlice(t *testing.T) {
++	s := renamedByteSlice("abc")
++	got, err := MarshalBytes(s)
++	if err != nil {
++		t.Fatalf("Marshal error: %v", err)
++	}
++	want := `"YWJj"`
++	if string(got) != want {
++		t.Errorf("Marshal:\n\tgot:  %s\n\twant: %s", got, want)
++	}
++	r := renamedRenamedByteSlice("abc")
++	got, err = MarshalBytes(r)
++	if err != nil {
++		t.Fatalf("Marshal error: %v", err)
++	}
++	if string(got) != want {
++		t.Errorf("Marshal:\n\tgot:  %s\n\twant: %s", got, want)
++	}
++}
++
++type SamePointerNoCycle struct {
++	Ptr1, Ptr2 *SamePointerNoCycle
++}
++
++var samePointerNoCycle = &SamePointerNoCycle{}
++
++type PointerCycle struct {
++	Ptr *PointerCycle
++}
++
++var pointerCycle = &PointerCycle{}
++
++type PointerCycleIndirect struct {
++	Ptrs []any
++}
++
++type RecursiveSlice []RecursiveSlice
++
++var (
++	pointerCycleIndirect = &PointerCycleIndirect{}
++	mapCycle             = make(map[string]any)
++	sliceCycle           = []any{nil}
++	sliceNoCycle         = []any{nil, nil}
++	recursiveSliceCycle  = []RecursiveSlice{nil}
++)
++
++func init() {
++	ptr := &SamePointerNoCycle{}
++	samePointerNoCycle.Ptr1 = ptr
++	samePointerNoCycle.Ptr2 = ptr
++
++	pointerCycle.Ptr = pointerCycle
++	pointerCycleIndirect.Ptrs = []any{pointerCycleIndirect}
++
++	mapCycle["x"] = mapCycle
++	sliceCycle[0] = sliceCycle
++	sliceNoCycle[1] = sliceNoCycle[:1]
++	for i := startDetectingCyclesAfter; i > 0; i-- {
++		sliceNoCycle = []any{sliceNoCycle}
++	}
++	recursiveSliceCycle[0] = recursiveSliceCycle
++}
++
++func TestSamePointerNoCycle(t *testing.T) {
++	if _, err := MarshalBytes(samePointerNoCycle); err != nil {
++		t.Fatalf("Marshal error: %v", err)
++	}
++}
++
++func TestSliceNoCycle(t *testing.T) {
++	if _, err := MarshalBytes(sliceNoCycle); err != nil {
++		t.Fatalf("Marshal error: %v", err)
++	}
++}
++
++func TestUnsupportedValues(t *testing.T) {
++	tests := []struct {
++		CaseName
++		in any
++	}{
++		{Name(""), math.NaN()},
++		{Name(""), math.Inf(-1)},
++		{Name(""), math.Inf(1)},
++		{Name(""), pointerCycle},
++		{Name(""), pointerCycleIndirect},
++		{Name(""), mapCycle},
++		{Name(""), sliceCycle},
++		{Name(""), recursiveSliceCycle},
++	}
++	for _, tt := range tests {
++		t.Run(tt.Name, func(t *testing.T) {
++			if _, err := MarshalBytes(tt.in); err != nil {
++				if _, ok := err.(*json.UnsupportedValueError); !ok {
++					t.Errorf("%s: Marshal error:\n\tgot:  %T\n\twant: %T", tt.Where, err, new(json.UnsupportedValueError))
++				}
++			} else {
++				t.Errorf("%s: Marshal error: got nil, want non-nil", tt.Where)
++			}
++		})
++	}
++}
++
++// Issue 43207
++func TestMarshalTextFloatMap(t *testing.T) {
++	m := map[textfloat]string{
++		textfloat(math.NaN()): "1",
++		textfloat(math.NaN()): "1",
++	}
++	got, err := MarshalBytes(m)
++	if err != nil {
++		t.Errorf("Marshal error: %v", err)
++	}
++	want := `{"TF:NaN":"1","TF:NaN":"1"}`
++	if string(got) != want {
++		t.Errorf("Marshal:\n\tgot:  %s\n\twant: %s", got, want)
++	}
++}
++
++// Ref has Marshaler and Unmarshaler methods with pointer receiver.
++type Ref int
++
++func (*Ref) MarshalJSON() ([]byte, error) {
++	return []byte(`"ref"`), nil
++}
++
++func (r *Ref) UnmarshalJSON([]byte) error {
++	*r = 12
++	return nil
++}
++
++// Val has Marshaler methods with value receiver.
++type Val int
++
++func (Val) MarshalJSON() ([]byte, error) {
++	return []byte(`"val"`), nil
++}
++
++// RefText has Marshaler and Unmarshaler methods with pointer receiver.
++type RefText int
++
++func (*RefText) MarshalText() ([]byte, error) {
++	return []byte(`"ref"`), nil
++}
++
++func (r *RefText) UnmarshalText([]byte) error {
++	*r = 13
++	return nil
++}
++
++// ValText has Marshaler methods with value receiver.
++type ValText int
++
++func (ValText) MarshalText() ([]byte, error) {
++	return []byte(`"val"`), nil
++}
++
++func TestRefValMarshal(t *testing.T) {
++	var s = struct {
++		R0 Ref
++		R1 *Ref
++		R2 RefText
++		R3 *RefText
++		V0 Val
++		V1 *Val
++		V2 ValText
++		V3 *ValText
++	}{
++		R0: 12,
++		R1: new(Ref),
++		R2: 14,
++		R3: new(RefText),
++		V0: 13,
++		V1: new(Val),
++		V2: 15,
++		V3: new(ValText),
++	}
++	const want = `{"R0":"ref","R1":"ref","R2":"\"ref\"","R3":"\"ref\"","V0":"val","V1":"val","V2":"\"val\"","V3":"\"val\""}`
++	b, err := MarshalBytes(&s)
++	if err != nil {
++		t.Fatalf("Marshal error: %v", err)
++	}
++	if got := string(b); got != want {
++		t.Errorf("Marshal:\n\tgot:  %s\n\twant: %s", got, want)
++	}
++}
++
++// C implements Marshaler and returns unescaped JSON.
++type C int
++
++func (C) MarshalJSON() ([]byte, error) {
++	return []byte(`"<&>"`), nil
++}
++
++// CText implements Marshaler and returns unescaped text.
++type CText int
++
++func (CText) MarshalText() ([]byte, error) {
++	return []byte(`"<&>"`), nil
++}
++
++func TestMarshalerEscaping(t *testing.T) {
++	var c C
++	want := `"\u003c\u0026\u003e"`
++	b, err := MarshalBytes(c)
++	if err != nil {
++		t.Fatalf("Marshal error: %v", err)
++	}
++	if got := string(b); got != want {
++		t.Errorf("Marshal:\n\tgot:  %s\n\twant: %s", got, want)
++	}
++
++	var ct CText
++	want = `"\"\u003c\u0026\u003e\""`
++	b, err = MarshalBytes(ct)
++	if err != nil {
++		t.Fatalf("Marshal error: %v", err)
++	}
++	if got := string(b); got != want {
++		t.Errorf("Marshal:\n\tgot:  %s\n\twant: %s", got, want)
++	}
++}
++
++func TestAnonymousFields(t *testing.T) {
++	tests := []struct {
++		CaseName
++		makeInput func() any // Function to create input value
++		want      string     // Expected JSON output
++	}{{
++		// Both S1 and S2 have a field named X. From the perspective of S,
++		// it is ambiguous which one X refers to.
++		// This should not serialize either field.
++		CaseName: Name("AmbiguousField"),
++		makeInput: func() any {
++			type (
++				S1 struct{ x, X int }
++				S2 struct{ x, X int }
++				S  struct {
++					S1
++					S2
++				}
++			)
++			return S{S1{1, 2}, S2{3, 4}}
++		},
++		want: `{}`,
++	}, {
++		CaseName: Name("DominantField"),
++		// Both S1 and S2 have a field named X, but since S has an X field as
++		// well, it takes precedence over S1.X and S2.X.
++		makeInput: func() any {
++			type (
++				S1 struct{ x, X int }
++				S2 struct{ x, X int }
++				S  struct {
++					S1
++					S2
++					x, X int
++				}
++			)
++			return S{S1{1, 2}, S2{3, 4}, 5, 6}
++		},
++		want: `{"X":6}`,
++	}, {
++		// Unexported embedded field of non-struct type should not be serialized.
++		CaseName: Name("UnexportedEmbeddedInt"),
++		makeInput: func() any {
++			type (
++				myInt int
++				S     struct{ myInt }
++			)
++			return S{5}
++		},
++		want: `{}`,
++	}, {
++		// Exported embedded field of non-struct type should be serialized.
++		CaseName: Name("ExportedEmbeddedInt"),
++		makeInput: func() any {
++			type (
++				MyInt int
++				S     struct{ MyInt }
++			)
++			return S{5}
++		},
++		want: `{"MyInt":5}`,
++	}, {
++		// Unexported embedded field of pointer to non-struct type
++		// should not be serialized.
++		CaseName: Name("UnexportedEmbeddedIntPointer"),
++		makeInput: func() any {
++			type (
++				myInt int
++				S     struct{ *myInt }
++			)
++			s := S{new(myInt)}
++			*s.myInt = 5
++			return s
++		},
++		want: `{}`,
++	}, {
++		// Exported embedded field of pointer to non-struct type
++		// should be serialized.
++		CaseName: Name("ExportedEmbeddedIntPointer"),
++		makeInput: func() any {
++			type (
++				MyInt int
++				S     struct{ *MyInt }
++			)
++			s := S{new(MyInt)}
++			*s.MyInt = 5
++			return s
++		},
++		want: `{"MyInt":5}`,
++	}, {
++		// Exported fields of embedded structs should have their
++		// exported fields be serialized regardless of whether the struct types
++		// themselves are exported.
++		CaseName: Name("EmbeddedStruct"),
++		makeInput: func() any {
++			type (
++				s1 struct{ x, X int }
++				S2 struct{ y, Y int }
++				S  struct {
++					s1
++					S2
++				}
++			)
++			return S{s1{1, 2}, S2{3, 4}}
++		},
++		want: `{"X":2,"Y":4}`,
++	}, {
++		// Exported fields of pointers to embedded structs should have their
++		// exported fields be serialized regardless of whether the struct types
++		// themselves are exported.
++		CaseName: Name("EmbeddedStructPointer"),
++		makeInput: func() any {
++			type (
++				s1 struct{ x, X int }
++				S2 struct{ y, Y int }
++				S  struct {
++					*s1
++					*S2
++				}
++			)
++			return S{&s1{1, 2}, &S2{3, 4}}
++		},
++		want: `{"X":2,"Y":4}`,
++	}, {
++		// Exported fields on embedded unexported structs at multiple levels
++		// of nesting should still be serialized.
++		CaseName: Name("NestedStructAndInts"),
++		makeInput: func() any {
++			type (
++				MyInt1 int
++				MyInt2 int
++				myInt  int
++				s2     struct {
++					MyInt2
++					myInt
++				}
++				s1 struct {
++					MyInt1
++					myInt
++					s2
++				}
++				S struct {
++					s1
++					myInt
++				}
++			)
++			return S{s1{1, 2, s2{3, 4}}, 6}
++		},
++		want: `{"MyInt1":1,"MyInt2":3}`,
++	}, {
++		// If an anonymous struct pointer field is nil, we should ignore
++		// the embedded fields behind it. Not properly doing so may
++		// result in the wrong output or reflect panics.
++		CaseName: Name("EmbeddedFieldBehindNilPointer"),
++		makeInput: func() any {
++			type (
++				S2 struct{ Field string }
++				S  struct{ *S2 }
++			)
++			return S{}
++		},
++		want: `{}`,
++	}}
++
++	for _, tt := range tests {
++		t.Run(tt.Name, func(t *testing.T) {
++			b, err := MarshalBytes(tt.makeInput())
++			if err != nil {
++				t.Fatalf("%s: Marshal error: %v", tt.Where, err)
++			}
++			if string(b) != tt.want {
++				t.Fatalf("%s: Marshal:\n\tgot:  %s\n\twant: %s", tt.Where, b, tt.want)
++			}
++		})
++	}
++}
++
++type BugA struct {
++	S string
++}
++
++type BugB struct {
++	BugA
++	S string
++}
++
++type BugC struct {
++	S string
++}
++
++// Legal Go: We never use the repeated embedded field (S).
++type BugX struct {
++	A int
++	BugA
++	BugB
++}
++
++// golang.org/issue/16042.
++// Even if a nil interface value is passed in, as long as
++// it implements Marshaler, it should be marshaled.
++type nilJSONMarshaler string
++
++func (nm *nilJSONMarshaler) MarshalJSON() ([]byte, error) {
++	if nm == nil {
++		return MarshalBytes("0zenil0")
++	}
++	return MarshalBytes("zenil:" + string(*nm))
++}
++
++// golang.org/issue/34235.
++// Even if a nil interface value is passed in, as long as
++// it implements encoding.TextMarshaler, it should be marshaled.
++type nilTextMarshaler string
++
++func (nm *nilTextMarshaler) MarshalText() ([]byte, error) {
++	if nm == nil {
++		return []byte("0zenil0"), nil
++	}
++	return []byte("zenil:" + string(*nm)), nil
++}
++
++// See golang.org/issue/16042 and golang.org/issue/34235.
++func TestNilMarshal(t *testing.T) {
++	tests := []struct {
++		CaseName
++		in   any
++		want string
++	}{
++		{Name(""), nil, `null`},
++		{Name(""), new(float64), `0`},
++		{Name(""), []any(nil), `null`},
++		{Name(""), []string(nil), `null`},
++		{Name(""), map[string]string(nil), `null`},
++		{Name(""), []byte(nil), `null`},
++		{Name(""), struct{ M string }{"gopher"}, `{"M":"gopher"}`},
++		{Name(""), struct{ M json.Marshaler }{}, `{"M":null}`},
++		{Name(""), struct{ M json.Marshaler }{(*nilJSONMarshaler)(nil)}, `{"M":"0zenil0"}`},
++		{Name(""), struct{ M any }{(*nilJSONMarshaler)(nil)}, `{"M":null}`},
++		{Name(""), struct{ M encoding.TextMarshaler }{}, `{"M":null}`},
++		{Name(""), struct{ M encoding.TextMarshaler }{(*nilTextMarshaler)(nil)}, `{"M":"0zenil0"}`},
++		{Name(""), struct{ M any }{(*nilTextMarshaler)(nil)}, `{"M":null}`},
++	}
++	for _, tt := range tests {
++		t.Run(tt.Name, func(t *testing.T) {
++			switch got, err := MarshalBytes(tt.in); {
++			case err != nil:
++				t.Fatalf("%s: Marshal error: %v", tt.Where, err)
++			case string(got) != tt.want:
++				t.Fatalf("%s: Marshal:\n\tgot:  %s\n\twant: %s", tt.Where, got, tt.want)
++			}
++		})
++	}
++}
++
++// Issue 5245.
++func TestEmbeddedBug(t *testing.T) {
++	v := BugB{
++		BugA{"A"},
++		"B",
++	}
++	b, err := MarshalBytes(v)
++	if err != nil {
++		t.Fatal("Marshal error:", err)
++	}
++	want := `{"S":"B"}`
++	got := string(b)
++	if got != want {
++		t.Fatalf("Marshal:\n\tgot:  %s\n\twant: %s", got, want)
++	}
++	// Now check that the duplicate field, S, does not appear.
++	x := BugX{
++		A: 23,
++	}
++	b, err = MarshalBytes(x)
++	if err != nil {
++		t.Fatal("Marshal error:", err)
++	}
++	want = `{"A":23}`
++	got = string(b)
++	if got != want {
++		t.Fatalf("Marshal:\n\tgot:  %s\n\twant: %s", got, want)
++	}
++}
++
++type BugD struct { // Same as BugA after tagging.
++	XXX string `json:"S"`
++}
++
++// BugD's tagged S field should dominate BugA's.
++type BugY struct {
++	BugA
++	BugD
++}
++
++// Test that a field with a tag dominates untagged fields.
++func TestTaggedFieldDominates(t *testing.T) {
++	v := BugY{
++		BugA{"BugA"},
++		BugD{"BugD"},
++	}
++	b, err := MarshalBytes(v)
++	if err != nil {
++		t.Fatal("Marshal error:", err)
++	}
++	want := `{"S":"BugD"}`
++	got := string(b)
++	if got != want {
++		t.Fatalf("Marshal:\n\tgot:  %s\n\twant: %s", got, want)
++	}
++}
++
++// There are no tags here, so S should not appear.
++type BugZ struct {
++	BugA
++	BugC
++	BugY // Contains a tagged S field through BugD; should not dominate.
++}
++
++func TestDuplicatedFieldDisappears(t *testing.T) {
++	v := BugZ{
++		BugA{"BugA"},
++		BugC{"BugC"},
++		BugY{
++			BugA{"nested BugA"},
++			BugD{"nested BugD"},
++		},
++	}
++	b, err := MarshalBytes(v)
++	if err != nil {
++		t.Fatal("Marshal error:", err)
++	}
++	want := `{}`
++	got := string(b)
++	if got != want {
++		t.Fatalf("Marshal:\n\tgot:  %s\n\twant: %s", got, want)
++	}
++}
++
++func TestIssue10281(t *testing.T) {
++	type Foo struct {
++		N json.Number
++	}
++	x := Foo{json.Number(`invalid`)}
++
++	if _, err := MarshalBytes(&x); err == nil {
++		t.Fatalf("Marshal error: got nil, want non-nil")
++	}
++}
++
++func TestMarshalErrorAndReuseEncodeState(t *testing.T) {
++	// Disable the GC temporarily to prevent encodeState's in Pool being cleaned away during the test.
++	percent := debug.SetGCPercent(-1)
++	defer debug.SetGCPercent(percent)
++
++	// Trigger an error in Marshal with cyclic data.
++	type Dummy struct {
++		Name string
++		Next *Dummy
++	}
++	dummy := Dummy{Name: "Dummy"}
++	dummy.Next = &dummy
++	if _, err := MarshalBytes(dummy); err == nil {
++		t.Errorf("Marshal error: got nil, want non-nil")
++	}
++
++	type Data struct {
++		A string
++		I int
++	}
++	want := Data{A: "a", I: 1}
++	b, err := MarshalBytes(want)
++	if err != nil {
++		t.Errorf("Marshal error: %v", err)
++	}
++
++	var got Data
++	if err := json.Unmarshal(b, &got); err != nil {
++		t.Errorf("Unmarshal error: %v", err)
++	}
++	if got != want {
++		t.Errorf("Unmarshal:\n\tgot:  %v\n\twant: %v", got, want)
++	}
++}
++
++// golang.org/issue/8582
++func TestEncodePointerString(t *testing.T) {
++	type stringPointer struct {
++		N *int64 `json:"n,string"`
++	}
++	var n int64 = 42
++	b, err := MarshalBytes(stringPointer{N: &n})
++	if err != nil {
++		t.Fatalf("Marshal error: %v", err)
++	}
++	if got, want := string(b), `{"n":"42"}`; got != want {
++		t.Fatalf("Marshal:\n\tgot:  %s\n\twant: %s", got, want)
++	}
++	var back stringPointer
++	switch err = json.Unmarshal(b, &back); {
++	case err != nil:
++		t.Fatalf("Unmarshal error: %v", err)
++	case back.N == nil:
++		t.Fatalf("Unmarshal: back.N = nil, want non-nil")
++	case *back.N != 42:
++		t.Fatalf("Unmarshal: *back.N = %d, want 42", *back.N)
++	}
++}
++
++var encodeStringTests = []struct {
++	in  string
++	out string
++}{
++	{"\x00", `"\u0000"`},
++	{"\x01", `"\u0001"`},
++	{"\x02", `"\u0002"`},
++	{"\x03", `"\u0003"`},
++	{"\x04", `"\u0004"`},
++	{"\x05", `"\u0005"`},
++	{"\x06", `"\u0006"`},
++	{"\x07", `"\u0007"`},
++	{"\x08", `"\b"`},
++	{"\x09", `"\t"`},
++	{"\x0a", `"\n"`},
++	{"\x0b", `"\u000b"`},
++	{"\x0c", `"\f"`},
++	{"\x0d", `"\r"`},
++	{"\x0e", `"\u000e"`},
++	{"\x0f", `"\u000f"`},
++	{"\x10", `"\u0010"`},
++	{"\x11", `"\u0011"`},
++	{"\x12", `"\u0012"`},
++	{"\x13", `"\u0013"`},
++	{"\x14", `"\u0014"`},
++	{"\x15", `"\u0015"`},
++	{"\x16", `"\u0016"`},
++	{"\x17", `"\u0017"`},
++	{"\x18", `"\u0018"`},
++	{"\x19", `"\u0019"`},
++	{"\x1a", `"\u001a"`},
++	{"\x1b", `"\u001b"`},
++	{"\x1c", `"\u001c"`},
++	{"\x1d", `"\u001d"`},
++	{"\x1e", `"\u001e"`},
++	{"\x1f", `"\u001f"`},
++}
++
++func TestEncodeString(t *testing.T) {
++	for _, tt := range encodeStringTests {
++		b, err := MarshalBytes(tt.in)
++		if err != nil {
++			t.Errorf("Marshal(%q) error: %v", tt.in, err)
++			continue
++		}
++		out := string(b)
++		if out != tt.out {
++			t.Errorf("Marshal(%q) = %#q, want %#q", tt.in, out, tt.out)
++		}
++	}
++}
++
++type jsonbyte byte
++
++func (b jsonbyte) MarshalJSON() ([]byte, error) { return tenc(`{"JB":%d}`, b) }
++
++type textbyte byte
++
++func (b textbyte) MarshalText() ([]byte, error) { return tenc(`TB:%d`, b) }
++
++type jsonint int
++
++func (i jsonint) MarshalJSON() ([]byte, error) { return tenc(`{"JI":%d}`, i) }
++
++type textint int
++
++func (i textint) MarshalText() ([]byte, error) { return tenc(`TI:%d`, i) }
++
++func tenc(format string, a ...any) ([]byte, error) {
++	var buf bytes.Buffer
++	fmt.Fprintf(&buf, format, a...)
++	return buf.Bytes(), nil
++}
++
++type textfloat float64
++
++func (f textfloat) MarshalText() ([]byte, error) { return tenc(`TF:%0.2f`, f) }
++
++// Issue 13783
++func TestEncodeBytekind(t *testing.T) {
++	tests := []struct {
++		CaseName
++		in   any
++		want string
++	}{
++		{Name(""), byte(7), "7"},
++		{Name(""), jsonbyte(7), `{"JB":7}`},
++		{Name(""), textbyte(4), `"TB:4"`},
++		{Name(""), jsonint(5), `{"JI":5}`},
++		{Name(""), textint(1), `"TI:1"`},
++		{Name(""), []byte{0, 1}, `"AAE="`},
++		{Name(""), []jsonbyte{0, 1}, `[{"JB":0},{"JB":1}]`},
++		{Name(""), [][]jsonbyte{{0, 1}, {3}}, `[[{"JB":0},{"JB":1}],[{"JB":3}]]`},
++		{Name(""), []textbyte{2, 3}, `["TB:2","TB:3"]`},
++		{Name(""), []jsonint{5, 4}, `[{"JI":5},{"JI":4}]`},
++		{Name(""), []textint{9, 3}, `["TI:9","TI:3"]`},
++		{Name(""), []int{9, 3}, `[9,3]`},
++		{Name(""), []textfloat{12, 3}, `["TF:12.00","TF:3.00"]`},
++	}
++	for _, tt := range tests {
++		t.Run(tt.Name, func(t *testing.T) {
++			b, err := MarshalBytes(tt.in)
++			if err != nil {
++				t.Errorf("%s: Marshal error: %v", tt.Where, err)
++			}
++			got, want := string(b), tt.want
++			if got != want {
++				t.Errorf("%s: Marshal:\n\tgot:  %s\n\twant: %s", tt.Where, got, want)
++			}
++		})
++	}
++}
++
++func TestTextMarshalerMapKeysAreSorted(t *testing.T) {
++	got, err := MarshalBytes(map[unmarshalerText]int{
++		{"x", "y"}: 1,
++		{"y", "x"}: 2,
++		{"a", "z"}: 3,
++		{"z", "a"}: 4,
++	})
++	if err != nil {
++		t.Fatalf("Marshal error: %v", err)
++	}
++	const want = `{"a:z":3,"x:y":1,"y:x":2,"z:a":4}`
++	if string(got) != want {
++		t.Errorf("Marshal:\n\tgot:  %s\n\twant: %s", got, want)
++	}
++}
++
++// https://golang.org/issue/33675
++func TestNilMarshalerTextMapKey(t *testing.T) {
++	got, err := MarshalBytes(map[*unmarshalerText]int{
++		(*unmarshalerText)(nil): 1,
++		{"A", "B"}:              2,
++	})
++	if err != nil {
++		t.Fatalf("Marshal error: %v", err)
++	}
++	const want = `{"":1,"A:B":2}`
++	if string(got) != want {
++		t.Errorf("Marshal:\n\tgot:  %s\n\twant: %s", got, want)
++	}
++}
++
++var re = regexp.MustCompile
++
++// syntactic checks on form of marshaled floating point numbers.
++var badFloatREs = []*regexp.Regexp{
++	re(`p`),                     // no binary exponential notation
++	re(`^\+`),                   // no leading + sign
++	re(`^-?0[^.]`),              // no unnecessary leading zeros
++	re(`^-?\.`),                 // leading zero required before decimal point
++	re(`\.(e|$)`),               // no trailing decimal
++	re(`\.[0-9]+0(e|$)`),        // no trailing zero in fraction
++	re(`^-?(0|[0-9]{2,})\..*e`), // exponential notation must have normalized mantissa
++	re(`e[0-9]`),                // positive exponent must be signed
++	re(`e[+-]0`),                // exponent must not have leading zeros
++	re(`e-[1-6]$`),              // not tiny enough for exponential notation
++	re(`e+(.|1.|20)$`),          // not big enough for exponential notation
++	re(`^-?0\.0000000`),         // too tiny, should use exponential notation
++	re(`^-?[0-9]{22}`),          // too big, should use exponential notation
++	re(`[1-9][0-9]{16}[1-9]`),   // too many significant digits in integer
++	re(`[1-9][0-9.]{17}[1-9]`),  // too many significant digits in decimal
++	// below here for float32 only
++	re(`[1-9][0-9]{8}[1-9]`),  // too many significant digits in integer
++	re(`[1-9][0-9.]{9}[1-9]`), // too many significant digits in decimal
++}
++
++func TestMarshalFloat(t *testing.T) {
++	t.Parallel()
++	nfail := 0
++	test := func(f float64, bits int) {
++		vf := any(f)
++		if bits == 32 {
++			f = float64(float32(f)) // round
++			vf = float32(f)
++		}
++		bout, err := MarshalBytes(vf)
++		if err != nil {
++			t.Errorf("Marshal(%T(%g)) error: %v", vf, vf, err)
++			nfail++
++			return
++		}
++		out := string(bout)
++
++		// result must convert back to the same float
++		g, err := strconv.ParseFloat(out, bits)
++		if err != nil {
++			t.Errorf("ParseFloat(%q) error: %v", out, err)
++			nfail++
++			return
++		}
++		if f != g || fmt.Sprint(f) != fmt.Sprint(g) { // fmt.Sprint handles ±0
++			t.Errorf("ParseFloat(%q):\n\tgot:  %g\n\twant: %g", out, float32(g), vf)
++			nfail++
++			return
++		}
++
++		bad := badFloatREs
++		if bits == 64 {
++			bad = bad[:len(bad)-2]
++		}
++		for _, re := range bad {
++			if re.MatchString(out) {
++				t.Errorf("Marshal(%T(%g)) = %q; must not match /%s/", vf, vf, out, re)
++				nfail++
++				return
++			}
++		}
++	}
++
++	var (
++		bigger  = math.Inf(+1)
++		smaller = math.Inf(-1)
++	)
++
++	var digits = "1.2345678901234567890123"
++	for i := len(digits); i >= 2; i-- {
++		if testing.Short() && i < len(digits)-4 {
++			break
++		}
++		for exp := -30; exp <= 30; exp++ {
++			for _, sign := range "+-" {
++				for bits := 32; bits <= 64; bits += 32 {
++					s := fmt.Sprintf("%c%se%d", sign, digits[:i], exp)
++					f, err := strconv.ParseFloat(s, bits)
++					if err != nil {
++						log.Fatal(err)
++					}
++					next := math.Nextafter
++					if bits == 32 {
++						next = func(g, h float64) float64 {
++							return float64(math.Nextafter32(float32(g), float32(h)))
++						}
++					}
++					test(f, bits)
++					test(next(f, bigger), bits)
++					test(next(f, smaller), bits)
++					if nfail > 50 {
++						t.Fatalf("stopping test early")
++					}
++				}
++			}
++		}
++	}
++	test(0, 64)
++	test(math.Copysign(0, -1), 64)
++	test(0, 32)
++	test(math.Copysign(0, -1), 32)
++}
++
++func TestMarshalRawMessageValue(t *testing.T) {
++	type (
++		T1 struct {
++			M json.RawMessage `json:",omitempty"`
++		}
++		T2 struct {
++			M *json.RawMessage `json:",omitempty"`
++		}
++	)
++
++	var (
++		rawNil   = json.RawMessage(nil)
++		rawEmpty = json.RawMessage([]byte{})
++		rawText  = json.RawMessage([]byte(`"foo"`))
++	)
++
++	tests := []struct {
++		CaseName
++		in   any
++		want string
++		ok   bool
++	}{
++		// Test with nil json.RawMessage.
++		{Name(""), rawNil, "null", true},
++		{Name(""), &rawNil, "null", true},
++		{Name(""), []any{rawNil}, "[null]", true},
++		{Name(""), &[]any{rawNil}, "[null]", true},
++		{Name(""), []any{&rawNil}, "[null]", true},
++		{Name(""), &[]any{&rawNil}, "[null]", true},
++		{Name(""), struct{ M json.RawMessage }{rawNil}, `{"M":null}`, true},
++		{Name(""), &struct{ M json.RawMessage }{rawNil}, `{"M":null}`, true},
++		{Name(""), struct{ M *json.RawMessage }{&rawNil}, `{"M":null}`, true},
++		{Name(""), &struct{ M *json.RawMessage }{&rawNil}, `{"M":null}`, true},
++		{Name(""), map[string]any{"M": rawNil}, `{"M":null}`, true},
++		{Name(""), &map[string]any{"M": rawNil}, `{"M":null}`, true},
++		{Name(""), map[string]any{"M": &rawNil}, `{"M":null}`, true},
++		{Name(""), &map[string]any{"M": &rawNil}, `{"M":null}`, true},
++		{Name(""), T1{rawNil}, "{}", true},
++		{Name(""), T2{&rawNil}, `{"M":null}`, true},
++		{Name(""), &T1{rawNil}, "{}", true},
++		{Name(""), &T2{&rawNil}, `{"M":null}`, true},
++
++		// Test with empty, but non-nil, RawMessage.
++		{Name(""), rawEmpty, "", false},
++		{Name(""), &rawEmpty, "", false},
++		{Name(""), []any{rawEmpty}, "", false},
++		{Name(""), &[]any{rawEmpty}, "", false},
++		{Name(""), []any{&rawEmpty}, "", false},
++		{Name(""), &[]any{&rawEmpty}, "", false},
++		{Name(""), struct{ X json.RawMessage }{rawEmpty}, "", false},
++		{Name(""), &struct{ X json.RawMessage }{rawEmpty}, "", false},
++		{Name(""), struct{ X *json.RawMessage }{&rawEmpty}, "", false},
++		{Name(""), &struct{ X *json.RawMessage }{&rawEmpty}, "", false},
++		{Name(""), map[string]any{"nil": rawEmpty}, "", false},
++		{Name(""), &map[string]any{"nil": rawEmpty}, "", false},
++		{Name(""), map[string]any{"nil": &rawEmpty}, "", false},
++		{Name(""), &map[string]any{"nil": &rawEmpty}, "", false},
++		{Name(""), T1{rawEmpty}, "{}", true},
++		{Name(""), T2{&rawEmpty}, "", false},
++		{Name(""), &T1{rawEmpty}, "{}", true},
++		{Name(""), &T2{&rawEmpty}, "", false},
++
++		// Test with RawMessage with some text.
++		//
++		// The tests below marked with Issue6458 used to generate "ImZvbyI=" instead "foo".
++		// This behavior was intentionally changed in Go 1.8.
++		// See https://golang.org/issues/14493#issuecomment-255857318
++		{Name(""), rawText, `"foo"`, true}, // Issue6458
++		{Name(""), &rawText, `"foo"`, true},
++		{Name(""), []any{rawText}, `["foo"]`, true},  // Issue6458
++		{Name(""), &[]any{rawText}, `["foo"]`, true}, // Issue6458
++		{Name(""), []any{&rawText}, `["foo"]`, true},
++		{Name(""), &[]any{&rawText}, `["foo"]`, true},
++		{Name(""), struct{ M json.RawMessage }{rawText}, `{"M":"foo"}`, true}, // Issue6458
++		{Name(""), &struct{ M json.RawMessage }{rawText}, `{"M":"foo"}`, true},
++		{Name(""), struct{ M *json.RawMessage }{&rawText}, `{"M":"foo"}`, true},
++		{Name(""), &struct{ M *json.RawMessage }{&rawText}, `{"M":"foo"}`, true},
++		{Name(""), map[string]any{"M": rawText}, `{"M":"foo"}`, true},  // Issue6458
++		{Name(""), &map[string]any{"M": rawText}, `{"M":"foo"}`, true}, // Issue6458
++		{Name(""), map[string]any{"M": &rawText}, `{"M":"foo"}`, true},
++		{Name(""), &map[string]any{"M": &rawText}, `{"M":"foo"}`, true},
++		{Name(""), T1{rawText}, `{"M":"foo"}`, true}, // Issue6458
++		{Name(""), T2{&rawText}, `{"M":"foo"}`, true},
++		{Name(""), &T1{rawText}, `{"M":"foo"}`, true},
++		{Name(""), &T2{&rawText}, `{"M":"foo"}`, true},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.Name, func(t *testing.T) {
++			b, err := MarshalBytes(tt.in)
++			if ok := (err == nil); ok != tt.ok {
++				if err != nil {
++					t.Errorf("%s: Marshal error: %v", tt.Where, err)
++				} else {
++					t.Errorf("%s: Marshal error: got nil, want non-nil", tt.Where)
++				}
++			}
++			if got := string(b); got != tt.want {
++				t.Errorf("%s: Marshal:\n\tinput: %#v\n\tgot:  %s\n\twant: %s", tt.Where, tt.in, got, tt.want)
++			}
++		})
++	}
++}
++
++type marshalPanic struct{}
++
++func (marshalPanic) MarshalJSON() ([]byte, error) { panic(0xdead) }
++
++func TestMarshalPanic(t *testing.T) {
++	defer func() {
++		if got := recover(); !reflect.DeepEqual(got, 0xdead) {
++			t.Errorf("panic() = (%T)(%v), want 0xdead", got, got)
++		}
++	}()
++	MarshalBytes(&marshalPanic{})
++	t.Error("Marshal should have panicked")
++}
++
++func TestMarshalUncommonFieldNames(t *testing.T) {
++	v := struct {
++		A0, À, Aβ int
++	}{}
++	b, err := MarshalBytes(v)
++	if err != nil {
++		t.Fatal("Marshal error:", err)
++	}
++	want := `{"A0":0,"À":0,"Aβ":0}`
++	got := string(b)
++	if got != want {
++		t.Fatalf("Marshal:\n\tgot:  %s\n\twant: %s", got, want)
++	}
++}
++
++func TestMarshalerError(t *testing.T) {
++	s := "test variable"
++	st := reflect.TypeOf(s)
++	errText := "json: test error"
++
++	tests := []struct {
++		CaseName
++		err  *MarshalerError
++		want string
++	}{{
++		Name(""),
++		&MarshalerError{st, fmt.Errorf(errText), ""},
++		"json: error calling MarshalJSON for type " + st.String() + ": " + errText,
++	}, {
++		Name(""),
++		&MarshalerError{st, fmt.Errorf(errText), "TestMarshalerError"},
++		"json: error calling TestMarshalerError for type " + st.String() + ": " + errText,
++	}}
++
++	for _, tt := range tests {
++		t.Run(tt.Name, func(t *testing.T) {
++			got := tt.err.Error()
++			if got != tt.want {
++				t.Errorf("%s: Error:\n\tgot:  %s\n\twant: %s", tt.Where, got, tt.want)
++			}
++		})
++	}
++}
++
++type marshaledValue string
++
++func (v marshaledValue) MarshalJSON() ([]byte, error) {
++	return []byte(v), nil
++}
++
++func TestIssue63379(t *testing.T) {
++	for _, v := range []string{
++		"[]<",
++		"[]>",
++		"[]&",
++		"[]\u2028",
++		"[]\u2029",
++		"{}<",
++		"{}>",
++		"{}&",
++		"{}\u2028",
++		"{}\u2029",
++	} {
++		_, err := MarshalBytes(marshaledValue(v))
++		if err == nil {
++			t.Errorf("expected error for %q", v)
++		}
++	}
++}
++
++type unmarshalerText struct {
++	A, B string
++}
++
++// needed for re-marshaling tests
++func (u unmarshalerText) MarshalText() ([]byte, error) {
++	return []byte(u.A + ":" + u.B), nil
++}
++
++func (u *unmarshalerText) UnmarshalText(b []byte) error {
++	pos := bytes.IndexByte(b, ':')
++	if pos == -1 {
++		return errors.New("missing separator")
++	}
++	u.A, u.B = string(b[:pos]), string(b[pos+1:])
++	return nil
++}
++
++var _ encoding.TextUnmarshaler = (*unmarshalerText)(nil)
+diff --git a/pkg/utils/jsonstream/escape.go b/pkg/utils/jsonstream/escape.go
+new file mode 100644
+index 000000000..23813ca16
+--- /dev/null
++++ b/pkg/utils/jsonstream/escape.go
+@@ -0,0 +1,46 @@
++// Copyright 2010 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package jsonstream
++
++import "io"
++
++type escapeWriter struct {
++	scan   *scanner
++	writer io.Writer
++	escape bool
++}
++
++func newEscapeWriter(writer io.Writer, escape bool) *escapeWriter {
++	return &escapeWriter{scan: newScanner(), writer: writer, escape: escape}
++}
++
++func (ew *escapeWriter) Write(src []byte) (int, error) {
++	for i, c := range src {
++		var err error
++		if ew.escape && (c == '<' || c == '>' || c == '&') {
++			_, err = ew.writer.Write([]byte{'\\', 'u', '0', '0', hex[c>>4], hex[c&0xF]})
++		} else if ew.escape && c == 0xE2 && i+2 < len(src) && src[i+1] == 0x80 && src[i+2]&^1 == 0xA8 {
++			// Convert U+2028 and U+2029 (E2 80 A8 and E2 80 A9).
++			_, err = ew.writer.Write([]byte{'\\', 'u', '2', '0', '2', hex[src[i+2]&0xF]})
++		} else {
++			_, err = ew.writer.Write([]byte{c})
++		}
++		if err != nil {
++			return i, err
++		}
++		v := ew.scan.step(ew.scan, c)
++		if v == scanError {
++			return i, ew.scan.err
++		}
++	}
++	return len(src), nil
++}
++
++func (ew *escapeWriter) checkEnd() error {
++	if ew.scan.eof() == scanError {
++		return ew.scan.err
++	}
++	return nil
++}
+diff --git a/pkg/utils/jsonstream/fold.go b/pkg/utils/jsonstream/fold.go
+new file mode 100644
+index 000000000..e0ee3d58a
+--- /dev/null
++++ b/pkg/utils/jsonstream/fold.go
+@@ -0,0 +1,48 @@
++// Copyright 2013 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package jsonstream
++
++import (
++	"unicode"
++	"unicode/utf8"
++)
++
++// foldName returns a folded string such that foldName(x) == foldName(y)
++// is identical to bytes.EqualFold(x, y).
++func foldName(in []byte) []byte {
++	// This is inlinable to take advantage of "function outlining".
++	var arr [32]byte // large enough for most JSON names
++	return appendFoldedName(arr[:0], in)
++}
++
++func appendFoldedName(out, in []byte) []byte {
++	for i := 0; i < len(in); {
++		// Handle single-byte ASCII.
++		if c := in[i]; c < utf8.RuneSelf {
++			if 'a' <= c && c <= 'z' {
++				c -= 'a' - 'A'
++			}
++			out = append(out, c)
++			i++
++			continue
++		}
++		// Handle multi-byte Unicode.
++		r, n := utf8.DecodeRune(in[i:])
++		out = utf8.AppendRune(out, foldRune(r))
++		i += n
++	}
++	return out
++}
++
++// foldRune is returns the smallest rune for all runes in the same fold set.
++func foldRune(r rune) rune {
++	for {
++		r2 := unicode.SimpleFold(r)
++		if r2 <= r {
++			return r2
++		}
++		r = r2
++	}
++}
+diff --git a/pkg/utils/jsonstream/scanner.go b/pkg/utils/jsonstream/scanner.go
+new file mode 100644
+index 000000000..018bcfaaa
+--- /dev/null
++++ b/pkg/utils/jsonstream/scanner.go
+@@ -0,0 +1,569 @@
++// Copyright 2010 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package jsonstream
++
++// JSON value parser state machine.
++// Just about at the limit of what is reasonable to write by hand.
++// Some parts are a bit tedious, but overall it nicely factors out the
++// otherwise common code from the multiple scanning functions
++// in this package (Compact, Indent, checkValid, etc).
++//
++// This file starts with two simple examples using the scanner
++// before diving into the scanner itself.
++
++import (
++	"strconv"
++)
++
++// A SyntaxError is a description of a JSON syntax error.
++// [Unmarshal] will return a SyntaxError if the JSON can't be parsed.
++type SyntaxError struct {
++	msg    string // description of error
++	Offset int64  // error occurred after reading Offset bytes
++}
++
++func (e *SyntaxError) Error() string { return e.msg }
++
++// A scanner is a JSON scanning state machine.
++// Callers call scan.reset and then pass bytes in one at a time
++// by calling scan.step(&scan, c) for each byte.
++// The return value, referred to as an opcode, tells the
++// caller about significant parsing events like beginning
++// and ending literals, objects, and arrays, so that the
++// caller can follow along if it wishes.
++// The return value scanEnd indicates that a single top-level
++// JSON value has been completed, *before* the byte that
++// just got passed in.  (The indication must be delayed in order
++// to recognize the end of numbers: is 123 a whole value or
++// the beginning of 12345e+6?).
++type scanner struct {
++	// The step is a func to be called to execute the next transition.
++	// Also tried using an integer constant and a single func
++	// with a switch, but using the func directly was 10% faster
++	// on a 64-bit Mac Mini, and it's nicer to read.
++	step func(*scanner, byte) int
++
++	// Reached end of top-level value.
++	endTop bool
++
++	// Stack of what we're in the middle of - array values, object keys, object values.
++	parseState []int
++
++	// Error that happened, if any.
++	err error
++
++	// total bytes consumed, updated by decoder.Decode (and deliberately
++	// not set to zero by scan.reset)
++	bytes int64
++}
++
++func newScanner() *scanner {
++	scanner := &scanner{}
++	scanner.reset()
++	return scanner
++}
++
++// These values are returned by the state transition functions
++// assigned to scanner.state and the method scanner.eof.
++// They give details about the current state of the scan that
++// callers might be interested to know about.
++// It is okay to ignore the return value of any particular
++// call to scanner.state: if one call returns scanError,
++// every subsequent call will return scanError too.
++const (
++	// Continue.
++	scanContinue     = iota // uninteresting byte
++	scanBeginLiteral        // end implied by next result != scanContinue
++	scanBeginObject         // begin object
++	scanObjectKey           // just finished object key (string)
++	scanObjectValue         // just finished non-last object value
++	scanEndObject           // end object (implies scanObjectValue if possible)
++	scanBeginArray          // begin array
++	scanArrayValue          // just finished array value
++	scanEndArray            // end array (implies scanArrayValue if possible)
++	scanSkipSpace           // space byte; can skip; known to be last "continue" result
++
++	// Stop.
++	scanEnd   // top-level value ended *before* this byte; known to be first "stop" result
++	scanError // hit an error, scanner.err.
++)
++
++// These values are stored in the parseState stack.
++// They give the current state of a composite value
++// being scanned. If the parser is inside a nested value
++// the parseState describes the nested state, outermost at entry 0.
++const (
++	parseObjectKey   = iota // parsing object key (before colon)
++	parseObjectValue        // parsing object value (after colon)
++	parseArrayValue         // parsing array value
++)
++
++// This limits the max nesting depth to prevent stack overflow.
++// This is permitted by https://tools.ietf.org/html/rfc7159#section-9
++const maxNestingDepth = 10000
++
++// reset prepares the scanner for use.
++// It must be called before calling s.step.
++func (s *scanner) reset() {
++	s.step = stateBeginValue
++	s.parseState = s.parseState[0:0]
++	s.err = nil
++	s.endTop = false
++}
++
++// eof tells the scanner that the end of input has been reached.
++// It returns a scan status just as s.step does.
++func (s *scanner) eof() int {
++	if s.err != nil {
++		return scanError
++	}
++	if s.endTop {
++		return scanEnd
++	}
++	s.step(s, ' ')
++	if s.endTop {
++		return scanEnd
++	}
++	if s.err == nil {
++		s.err = &SyntaxError{"unexpected end of JSON input", s.bytes}
++	}
++	return scanError
++}
++
++// pushParseState pushes a new parse state p onto the parse stack.
++// an error state is returned if maxNestingDepth was exceeded, otherwise successState is returned.
++func (s *scanner) pushParseState(c byte, newParseState int, successState int) int {
++	s.parseState = append(s.parseState, newParseState)
++	if len(s.parseState) <= maxNestingDepth {
++		return successState
++	}
++	return s.error(c, "exceeded max depth")
++}
++
++// popParseState pops a parse state (already obtained) off the stack
++// and updates s.step accordingly.
++func (s *scanner) popParseState() {
++	n := len(s.parseState) - 1
++	s.parseState = s.parseState[0:n]
++	if n == 0 {
++		s.step = stateEndTop
++		s.endTop = true
++	} else {
++		s.step = stateEndValue
++	}
++}
++
++func isSpace(c byte) bool {
++	return c <= ' ' && (c == ' ' || c == '\t' || c == '\r' || c == '\n')
++}
++
++// stateBeginValueOrEmpty is the state after reading `[`.
++func stateBeginValueOrEmpty(s *scanner, c byte) int {
++	if isSpace(c) {
++		return scanSkipSpace
++	}
++	if c == ']' {
++		return stateEndValue(s, c)
++	}
++	return stateBeginValue(s, c)
++}
++
++// stateBeginValue is the state at the beginning of the input.
++func stateBeginValue(s *scanner, c byte) int {
++	if isSpace(c) {
++		return scanSkipSpace
++	}
++	switch c {
++	case '{':
++		s.step = stateBeginStringOrEmpty
++		return s.pushParseState(c, parseObjectKey, scanBeginObject)
++	case '[':
++		s.step = stateBeginValueOrEmpty
++		return s.pushParseState(c, parseArrayValue, scanBeginArray)
++	case '"':
++		s.step = stateInString
++		return scanBeginLiteral
++	case '-':
++		s.step = stateNeg
++		return scanBeginLiteral
++	case '0': // beginning of 0.123
++		s.step = state0
++		return scanBeginLiteral
++	case 't': // beginning of true
++		s.step = stateT
++		return scanBeginLiteral
++	case 'f': // beginning of false
++		s.step = stateF
++		return scanBeginLiteral
++	case 'n': // beginning of null
++		s.step = stateN
++		return scanBeginLiteral
++	}
++	if '1' <= c && c <= '9' { // beginning of 1234.5
++		s.step = state1
++		return scanBeginLiteral
++	}
++	return s.error(c, "looking for beginning of value")
++}
++
++// stateBeginStringOrEmpty is the state after reading `{`.
++func stateBeginStringOrEmpty(s *scanner, c byte) int {
++	if isSpace(c) {
++		return scanSkipSpace
++	}
++	if c == '}' {
++		n := len(s.parseState)
++		s.parseState[n-1] = parseObjectValue
++		return stateEndValue(s, c)
++	}
++	return stateBeginString(s, c)
++}
++
++// stateBeginString is the state after reading `{"key": value,`.
++func stateBeginString(s *scanner, c byte) int {
++	if isSpace(c) {
++		return scanSkipSpace
++	}
++	if c == '"' {
++		s.step = stateInString
++		return scanBeginLiteral
++	}
++	return s.error(c, "looking for beginning of object key string")
++}
++
++// stateEndValue is the state after completing a value,
++// such as after reading `{}` or `true` or `["x"`.
++func stateEndValue(s *scanner, c byte) int {
++	n := len(s.parseState)
++	if n == 0 {
++		// Completed top-level before the current byte.
++		s.step = stateEndTop
++		s.endTop = true
++		return stateEndTop(s, c)
++	}
++	if isSpace(c) {
++		s.step = stateEndValue
++		return scanSkipSpace
++	}
++	ps := s.parseState[n-1]
++	switch ps {
++	case parseObjectKey:
++		if c == ':' {
++			s.parseState[n-1] = parseObjectValue
++			s.step = stateBeginValue
++			return scanObjectKey
++		}
++		return s.error(c, "after object key")
++	case parseObjectValue:
++		if c == ',' {
++			s.parseState[n-1] = parseObjectKey
++			s.step = stateBeginString
++			return scanObjectValue
++		}
++		if c == '}' {
++			s.popParseState()
++			return scanEndObject
++		}
++		return s.error(c, "after object key:value pair")
++	case parseArrayValue:
++		if c == ',' {
++			s.step = stateBeginValue
++			return scanArrayValue
++		}
++		if c == ']' {
++			s.popParseState()
++			return scanEndArray
++		}
++		return s.error(c, "after array element")
++	}
++	return s.error(c, "")
++}
++
++// stateEndTop is the state after finishing the top-level value,
++// such as after reading `{}` or `[1,2,3]`.
++// Only space characters should be seen now.
++func stateEndTop(s *scanner, c byte) int {
++	if !isSpace(c) {
++		// Complain about non-space byte on next call.
++		s.error(c, "after top-level value")
++	}
++	return scanEnd
++}
++
++// stateInString is the state after reading `"`.
++func stateInString(s *scanner, c byte) int {
++	if c == '"' {
++		s.step = stateEndValue
++		return scanContinue
++	}
++	if c == '\\' {
++		s.step = stateInStringEsc
++		return scanContinue
++	}
++	if c < 0x20 {
++		return s.error(c, "in string literal")
++	}
++	return scanContinue
++}
++
++// stateInStringEsc is the state after reading `"\` during a quoted string.
++func stateInStringEsc(s *scanner, c byte) int {
++	switch c {
++	case 'b', 'f', 'n', 'r', 't', '\\', '/', '"':
++		s.step = stateInString
++		return scanContinue
++	case 'u':
++		s.step = stateInStringEscU
++		return scanContinue
++	}
++	return s.error(c, "in string escape code")
++}
++
++// stateInStringEscU is the state after reading `"\u` during a quoted string.
++func stateInStringEscU(s *scanner, c byte) int {
++	if '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F' {
++		s.step = stateInStringEscU1
++		return scanContinue
++	}
++	// numbers
++	return s.error(c, "in \\u hexadecimal character escape")
++}
++
++// stateInStringEscU1 is the state after reading `"\u1` during a quoted string.
++func stateInStringEscU1(s *scanner, c byte) int {
++	if '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F' {
++		s.step = stateInStringEscU12
++		return scanContinue
++	}
++	// numbers
++	return s.error(c, "in \\u hexadecimal character escape")
++}
++
++// stateInStringEscU12 is the state after reading `"\u12` during a quoted string.
++func stateInStringEscU12(s *scanner, c byte) int {
++	if '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F' {
++		s.step = stateInStringEscU123
++		return scanContinue
++	}
++	// numbers
++	return s.error(c, "in \\u hexadecimal character escape")
++}
++
++// stateInStringEscU123 is the state after reading `"\u123` during a quoted string.
++func stateInStringEscU123(s *scanner, c byte) int {
++	if '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F' {
++		s.step = stateInString
++		return scanContinue
++	}
++	// numbers
++	return s.error(c, "in \\u hexadecimal character escape")
++}
++
++// stateNeg is the state after reading `-` during a number.
++func stateNeg(s *scanner, c byte) int {
++	if c == '0' {
++		s.step = state0
++		return scanContinue
++	}
++	if '1' <= c && c <= '9' {
++		s.step = state1
++		return scanContinue
++	}
++	return s.error(c, "in numeric literal")
++}
++
++// state1 is the state after reading a non-zero integer during a number,
++// such as after reading `1` or `100` but not `0`.
++func state1(s *scanner, c byte) int {
++	if '0' <= c && c <= '9' {
++		s.step = state1
++		return scanContinue
++	}
++	return state0(s, c)
++}
++
++// state0 is the state after reading `0` during a number.
++func state0(s *scanner, c byte) int {
++	if c == '.' {
++		s.step = stateDot
++		return scanContinue
++	}
++	if c == 'e' || c == 'E' {
++		s.step = stateE
++		return scanContinue
++	}
++	return stateEndValue(s, c)
++}
++
++// stateDot is the state after reading the integer and decimal point in a number,
++// such as after reading `1.`.
++func stateDot(s *scanner, c byte) int {
++	if '0' <= c && c <= '9' {
++		s.step = stateDot0
++		return scanContinue
++	}
++	return s.error(c, "after decimal point in numeric literal")
++}
++
++// stateDot0 is the state after reading the integer, decimal point, and subsequent
++// digits of a number, such as after reading `3.14`.
++func stateDot0(s *scanner, c byte) int {
++	if '0' <= c && c <= '9' {
++		return scanContinue
++	}
++	if c == 'e' || c == 'E' {
++		s.step = stateE
++		return scanContinue
++	}
++	return stateEndValue(s, c)
++}
++
++// stateE is the state after reading the mantissa and e in a number,
++// such as after reading `314e` or `0.314e`.
++func stateE(s *scanner, c byte) int {
++	if c == '+' || c == '-' {
++		s.step = stateESign
++		return scanContinue
++	}
++	return stateESign(s, c)
++}
++
++// stateESign is the state after reading the mantissa, e, and sign in a number,
++// such as after reading `314e-` or `0.314e+`.
++func stateESign(s *scanner, c byte) int {
++	if '0' <= c && c <= '9' {
++		s.step = stateE0
++		return scanContinue
++	}
++	return s.error(c, "in exponent of numeric literal")
++}
++
++// stateE0 is the state after reading the mantissa, e, optional sign,
++// and at least one digit of the exponent in a number,
++// such as after reading `314e-2` or `0.314e+1` or `3.14e0`.
++func stateE0(s *scanner, c byte) int {
++	if '0' <= c && c <= '9' {
++		return scanContinue
++	}
++	return stateEndValue(s, c)
++}
++
++// stateT is the state after reading `t`.
++func stateT(s *scanner, c byte) int {
++	if c == 'r' {
++		s.step = stateTr
++		return scanContinue
++	}
++	return s.error(c, "in literal true (expecting 'r')")
++}
++
++// stateTr is the state after reading `tr`.
++func stateTr(s *scanner, c byte) int {
++	if c == 'u' {
++		s.step = stateTru
++		return scanContinue
++	}
++	return s.error(c, "in literal true (expecting 'u')")
++}
++
++// stateTru is the state after reading `tru`.
++func stateTru(s *scanner, c byte) int {
++	if c == 'e' {
++		s.step = stateEndValue
++		return scanContinue
++	}
++	return s.error(c, "in literal true (expecting 'e')")
++}
++
++// stateF is the state after reading `f`.
++func stateF(s *scanner, c byte) int {
++	if c == 'a' {
++		s.step = stateFa
++		return scanContinue
++	}
++	return s.error(c, "in literal false (expecting 'a')")
++}
++
++// stateFa is the state after reading `fa`.
++func stateFa(s *scanner, c byte) int {
++	if c == 'l' {
++		s.step = stateFal
++		return scanContinue
++	}
++	return s.error(c, "in literal false (expecting 'l')")
++}
++
++// stateFal is the state after reading `fal`.
++func stateFal(s *scanner, c byte) int {
++	if c == 's' {
++		s.step = stateFals
++		return scanContinue
++	}
++	return s.error(c, "in literal false (expecting 's')")
++}
++
++// stateFals is the state after reading `fals`.
++func stateFals(s *scanner, c byte) int {
++	if c == 'e' {
++		s.step = stateEndValue
++		return scanContinue
++	}
++	return s.error(c, "in literal false (expecting 'e')")
++}
++
++// stateN is the state after reading `n`.
++func stateN(s *scanner, c byte) int {
++	if c == 'u' {
++		s.step = stateNu
++		return scanContinue
++	}
++	return s.error(c, "in literal null (expecting 'u')")
++}
++
++// stateNu is the state after reading `nu`.
++func stateNu(s *scanner, c byte) int {
++	if c == 'l' {
++		s.step = stateNul
++		return scanContinue
++	}
++	return s.error(c, "in literal null (expecting 'l')")
++}
++
++// stateNul is the state after reading `nul`.
++func stateNul(s *scanner, c byte) int {
++	if c == 'l' {
++		s.step = stateEndValue
++		return scanContinue
++	}
++	return s.error(c, "in literal null (expecting 'l')")
++}
++
++// stateError is the state after reaching a syntax error,
++// such as after reading `[1}` or `5.1.2`.
++func stateError(s *scanner, c byte) int {
++	return scanError
++}
++
++// error records an error and switches to the error state.
++func (s *scanner) error(c byte, context string) int {
++	s.step = stateError
++	s.err = &SyntaxError{"invalid character " + quoteChar(c) + " " + context, s.bytes}
++	return scanError
++}
++
++// quoteChar formats c as a quoted character literal.
++func quoteChar(c byte) string {
++	// special cases - different from quoted strings
++	if c == '\'' {
++		return `'\''`
++	}
++	if c == '"' {
++		return `'"'`
++	}
++
++	// use quoted string with different quotation marks
++	s := strconv.Quote(string(c))
++	return "'" + s[1:len(s)-1] + "'"
++}
+diff --git a/pkg/utils/jsonstream/stream_test.go b/pkg/utils/jsonstream/stream_test.go
+new file mode 100644
+index 000000000..8a3a2010c
+--- /dev/null
++++ b/pkg/utils/jsonstream/stream_test.go
+@@ -0,0 +1,33 @@
++// Copyright 2010 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package jsonstream
++
++import (
++	"fmt"
++	"path"
++	"runtime"
++)
++
++// CaseName is a case name annotated with a file and line.
++type CaseName struct {
++	Name  string
++	Where CasePos
++}
++
++// Name annotates a case name with the file and line of the caller.
++func Name(s string) (c CaseName) {
++	c.Name = s
++	runtime.Callers(2, c.Where.pc[:])
++	return c
++}
++
++// CasePos represents a file and line number.
++type CasePos struct{ pc [1]uintptr }
++
++func (pos CasePos) String() string {
++	frames := runtime.CallersFrames(pos.pc[:])
++	frame, _ := frames.Next()
++	return fmt.Sprintf("%s:%d", path.Base(frame.File), frame.Line)
++}
+diff --git a/pkg/utils/jsonstream/tables.go b/pkg/utils/jsonstream/tables.go
+new file mode 100644
+index 000000000..81a99eabc
+--- /dev/null
++++ b/pkg/utils/jsonstream/tables.go
+@@ -0,0 +1,218 @@
++// Copyright 2016 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package jsonstream
++
++import "unicode/utf8"
++
++// safeSet holds the value true if the ASCII character with the given array
++// position can be represented inside a JSON string without any further
++// escaping.
++//
++// All values are true except for the ASCII control characters (0-31), the
++// double quote ("), and the backslash character ("\").
++var safeSet = [utf8.RuneSelf]bool{
++	' ':      true,
++	'!':      true,
++	'"':      false,
++	'#':      true,
++	'$':      true,
++	'%':      true,
++	'&':      true,
++	'\'':     true,
++	'(':      true,
++	')':      true,
++	'*':      true,
++	'+':      true,
++	',':      true,
++	'-':      true,
++	'.':      true,
++	'/':      true,
++	'0':      true,
++	'1':      true,
++	'2':      true,
++	'3':      true,
++	'4':      true,
++	'5':      true,
++	'6':      true,
++	'7':      true,
++	'8':      true,
++	'9':      true,
++	':':      true,
++	';':      true,
++	'<':      true,
++	'=':      true,
++	'>':      true,
++	'?':      true,
++	'@':      true,
++	'A':      true,
++	'B':      true,
++	'C':      true,
++	'D':      true,
++	'E':      true,
++	'F':      true,
++	'G':      true,
++	'H':      true,
++	'I':      true,
++	'J':      true,
++	'K':      true,
++	'L':      true,
++	'M':      true,
++	'N':      true,
++	'O':      true,
++	'P':      true,
++	'Q':      true,
++	'R':      true,
++	'S':      true,
++	'T':      true,
++	'U':      true,
++	'V':      true,
++	'W':      true,
++	'X':      true,
++	'Y':      true,
++	'Z':      true,
++	'[':      true,
++	'\\':     false,
++	']':      true,
++	'^':      true,
++	'_':      true,
++	'`':      true,
++	'a':      true,
++	'b':      true,
++	'c':      true,
++	'd':      true,
++	'e':      true,
++	'f':      true,
++	'g':      true,
++	'h':      true,
++	'i':      true,
++	'j':      true,
++	'k':      true,
++	'l':      true,
++	'm':      true,
++	'n':      true,
++	'o':      true,
++	'p':      true,
++	'q':      true,
++	'r':      true,
++	's':      true,
++	't':      true,
++	'u':      true,
++	'v':      true,
++	'w':      true,
++	'x':      true,
++	'y':      true,
++	'z':      true,
++	'{':      true,
++	'|':      true,
++	'}':      true,
++	'~':      true,
++	'\u007f': true,
++}
++
++// htmlSafeSet holds the value true if the ASCII character with the given
++// array position can be safely represented inside a JSON string, embedded
++// inside of HTML <script> tags, without any additional escaping.
++//
++// All values are true except for the ASCII control characters (0-31), the
++// double quote ("), the backslash character ("\"), HTML opening and closing
++// tags ("<" and ">"), and the ampersand ("&").
++var htmlSafeSet = [utf8.RuneSelf]bool{
++	' ':      true,
++	'!':      true,
++	'"':      false,
++	'#':      true,
++	'$':      true,
++	'%':      true,
++	'&':      false,
++	'\'':     true,
++	'(':      true,
++	')':      true,
++	'*':      true,
++	'+':      true,
++	',':      true,
++	'-':      true,
++	'.':      true,
++	'/':      true,
++	'0':      true,
++	'1':      true,
++	'2':      true,
++	'3':      true,
++	'4':      true,
++	'5':      true,
++	'6':      true,
++	'7':      true,
++	'8':      true,
++	'9':      true,
++	':':      true,
++	';':      true,
++	'<':      false,
++	'=':      true,
++	'>':      false,
++	'?':      true,
++	'@':      true,
++	'A':      true,
++	'B':      true,
++	'C':      true,
++	'D':      true,
++	'E':      true,
++	'F':      true,
++	'G':      true,
++	'H':      true,
++	'I':      true,
++	'J':      true,
++	'K':      true,
++	'L':      true,
++	'M':      true,
++	'N':      true,
++	'O':      true,
++	'P':      true,
++	'Q':      true,
++	'R':      true,
++	'S':      true,
++	'T':      true,
++	'U':      true,
++	'V':      true,
++	'W':      true,
++	'X':      true,
++	'Y':      true,
++	'Z':      true,
++	'[':      true,
++	'\\':     false,
++	']':      true,
++	'^':      true,
++	'_':      true,
++	'`':      true,
++	'a':      true,
++	'b':      true,
++	'c':      true,
++	'd':      true,
++	'e':      true,
++	'f':      true,
++	'g':      true,
++	'h':      true,
++	'i':      true,
++	'j':      true,
++	'k':      true,
++	'l':      true,
++	'm':      true,
++	'n':      true,
++	'o':      true,
++	'p':      true,
++	'q':      true,
++	'r':      true,
++	's':      true,
++	't':      true,
++	'u':      true,
++	'v':      true,
++	'w':      true,
++	'x':      true,
++	'y':      true,
++	'z':      true,
++	'{':      true,
++	'|':      true,
++	'}':      true,
++	'~':      true,
++	'\u007f': true,
++}
+diff --git a/pkg/utils/jsonstream/tags.go b/pkg/utils/jsonstream/tags.go
+new file mode 100644
+index 000000000..53979b5ed
+--- /dev/null
++++ b/pkg/utils/jsonstream/tags.go
+@@ -0,0 +1,38 @@
++// Copyright 2011 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package jsonstream
++
++import (
++	"strings"
++)
++
++// tagOptions is the string following a comma in a struct field's "json"
++// tag, or the empty string. It does not include the leading comma.
++type tagOptions string
++
++// parseTag splits a struct field's json tag into its name and
++// comma-separated options.
++func parseTag(tag string) (string, tagOptions) {
++	tag, opt, _ := strings.Cut(tag, ",")
++	return tag, tagOptions(opt)
++}
++
++// Contains reports whether a comma-separated list of options
++// contains a particular substr flag. substr must be surrounded by a
++// string boundary or commas.
++func (o tagOptions) Contains(optionName string) bool {
++	if len(o) == 0 {
++		return false
++	}
++	s := string(o)
++	for s != "" {
++		var name string
++		name, s, _ = strings.Cut(s, ",")
++		if name == optionName {
++			return true
++		}
++	}
++	return false
++}
